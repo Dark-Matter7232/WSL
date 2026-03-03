@@ -45,7 +45,8 @@ private:
     void SetupLoopbackDevice();
     void UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family);
     void UpdateDnsSettings(const networking::DnsInfo& dns);
-    void UpdateIpAddress(const networking::EndpointIpAddress& ipAddress);
+    void UpdateIpv4Address(const networking::EndpointIpAddress& ipAddress);
+    void UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress);
     void UpdateMtu(ULONG mtu);
 
     mutable wil::srwlock m_lock;
@@ -63,6 +64,7 @@ private:
     ULONG m_networkMtu = 0;
     std::wstring m_trackedDeviceOptions;
     std::wstring m_trackedDefaultRoute;
+    std::wstring m_trackedDefaultRouteV6;
     networking::DnsInfo m_trackedDnsSettings{};
 
     // Note: this field must be destroyed first to stop the callbacks before any other field is destroyed.

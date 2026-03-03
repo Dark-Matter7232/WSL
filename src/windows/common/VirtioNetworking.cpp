@@ -132,19 +132,12 @@ int VirtioNetworking::ModifyOpenPorts(_In_ PCWSTR tag, _In_ const SOCKADDR_INET&
         LOG_HR_MSG(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), "Unsupported bind protocol %d", protocol);
         return 0;
     }
-    else if (addr.si_family == AF_INET6)
-    {
-        // The virtio net adapter does not yet support IPv6 packets, so any traffic would arrive via
-        // IPv4. If the caller wants IPv4 they will also likely listen on an IPv4 address, which will
-        // be handled as a separate callback to this same code.
-        return 0;
-    }
 
     auto lock = m_lock.lock_exclusive();
     const auto server = m_guestDeviceManager->GetRemoteFileSystem(VIRTIO_NET_CLASS_ID, c_defaultDeviceTag);
     if (server)
     {
-        std::wstring portString = std::format(L"tag={};port_number={}", tag, addr.Ipv4.sin_port);
+        std::wstring portString = std::format(L"tag={};port_number={}", tag, INETADDR_PORT(reinterpret_cast<const SOCKADDR*>(&addr)));
         if (protocol == IPPROTO_UDP)
         {
             portString += L";udp";
@@ -172,32 +165,26 @@ try
     // Query current networking information before acquiring the lock.
     auto networkSettings = GetHostEndpointSettings();
 
-    // TODO: Determine gateway MAC address
     std::wstring device_options;
-    auto client_ip = networkSettings->PreferredIpAddress.AddressString;
-    if (!client_ip.empty())
-    {
-        device_options += L"client_ip=" + client_ip;
-    }
-
-    if (!networkSettings->MacAddress.empty())
-    {
-        if (!device_options.empty())
+    auto appendOption = [&device_options](const std::wstring& key, const std::wstring& value) {
+        if (!value.empty())
         {
-            device_options += L';';
+            if (!device_options.empty())
+            {
+                device_options += L';';
+            }
+            device_options += key + L'=' + value;
         }
-        device_options += L"client_mac=" + networkSettings->MacAddress;
-    }
+    };
 
+    appendOption(L"client_ip", networkSettings->PreferredIpAddress.AddressString);
+    appendOption(L"client_ip_ipv6", networkSettings->PreferredIpv6Address.AddressString);
+    appendOption(L"client_mac", networkSettings->MacAddress);
+
+    // N.B. The devicehost only uses gateway addresses from the device options string for DHCP responses.
+    // Since DHCP is not currently enabled, gateway_ip and gateway_ipv6 are omitted from the options.
     std::wstring default_route = networkSettings->GetBestGatewayAddressString();
-    if (!default_route.empty())
-    {
-        if (!device_options.empty())
-        {
-            device_options += L';';
-        }
-        device_options += L"gateway_ip=" + default_route;
-    }
+    std::wstring default_route_v6 = networkSettings->GetBestGatewayV6AddressString();
 
     networking::DnsInfo currentDns{};
     if (WI_IsFlagSet(m_flags, VirtioNetworkingFlags::DnsTunneling))
@@ -206,7 +193,8 @@ try
     }
     else
     {
-        currentDns = networking::HostDnsInfo::GetDnsSettings(networking::DnsSettingsFlags::IncludeVpn);
+        currentDns = networking::HostDnsInfo::GetDnsSettings(
+            networking::DnsSettingsFlags::IncludeVpn | networking::DnsSettingsFlags::IncludeIpv6Servers);
     }
 
     const auto minMtu = GetMinimumConnectedInterfaceMtu();
@@ -236,7 +224,13 @@ try
     // Update IP address if needed.
     if (!m_networkSettings || networkSettings->PreferredIpAddress != m_networkSettings->PreferredIpAddress)
     {
-        UpdateIpAddress(networkSettings->PreferredIpAddress);
+        UpdateIpv4Address(networkSettings->PreferredIpAddress);
+    }
+
+    // Update IPv6 address if needed.
+    if (!m_networkSettings || networkSettings->PreferredIpv6Address != m_networkSettings->PreferredIpv6Address)
+    {
+        UpdateIpv6Address(networkSettings->PreferredIpv6Address);
     }
 
     // Send default route update if needed.
@@ -244,6 +238,13 @@ try
     {
         m_trackedDefaultRoute = default_route;
         UpdateDefaultRoute(default_route, AF_INET);
+    }
+
+    // Send IPv6 default route update if needed.
+    if (default_route_v6 != m_trackedDefaultRouteV6)
+    {
+        m_trackedDefaultRouteV6 = default_route_v6;
+        UpdateDefaultRoute(default_route_v6, AF_INET6);
     }
 
     // Send DNS update if needed.
@@ -322,14 +323,37 @@ void VirtioNetworking::UpdateDnsSettings(const networking::DnsInfo& dns)
     m_gnsChannel.SendHnsNotification(ToJsonW(notification).c_str(), m_adapterId.value());
 }
 
-void VirtioNetworking::UpdateIpAddress(const networking::EndpointIpAddress& ipAddress)
+void VirtioNetworking::UpdateIpv4Address(const networking::EndpointIpAddress& ipAddress)
 {
-    // N.B. The MAC address is advertised with the virtio device so doesn't need to be explicitly set.
+    if (ipAddress.AddressString.empty())
+    {
+        return;
+    }
+
+    // N.B. SendEndpointState triggers SetAdapterConfiguration on the Linux side
+    // which brings the interface UP and configures the full adapter state.
     hns::HNSEndpoint endpointProperties;
     endpointProperties.ID = m_adapterId.value();
     endpointProperties.IPAddress = ipAddress.AddressString;
     endpointProperties.PrefixLength = ipAddress.PrefixLength;
     m_gnsChannel.SendEndpointState(endpointProperties);
+}
+
+void VirtioNetworking::UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress)
+{
+    if (ipAddress.AddressString.empty())
+    {
+        return;
+    }
+
+    // The HNSEndpoint schema doesn't support IPv6 addresses, so use ModifyGuestEndpointSettingRequest.
+    hns::ModifyGuestEndpointSettingRequest<hns::IPAddress> request;
+    request.RequestType = hns::ModifyRequestType::Add;
+    request.ResourceType = hns::GuestEndpointResourceType::IPAddress;
+    request.Settings.Address = ipAddress.AddressString;
+    request.Settings.Family = ipAddress.Address.si_family;
+    request.Settings.OnLinkPrefixLength = ipAddress.PrefixLength;
+    m_gnsChannel.SendHnsNotification(ToJsonW(request).c_str(), m_adapterId.value());
 }
 
 void VirtioNetworking::UpdateMtu(ULONG mtu)
