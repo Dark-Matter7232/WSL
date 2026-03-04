@@ -110,8 +110,9 @@ std::shared_ptr<wsl::core::networking::NetworkSettings> wsl::core::networking::G
         // Synthesize a gateway from the first host address in the subnet.
         SOCKADDR_INET gatewayAddr{};
         gatewayAddr.si_family = AF_INET;
-        gatewayAddr.Ipv4.sin_addr.s_addr =
-            htonl((ntohl(address.Address.Ipv4.sin_addr.s_addr) & ~((1 << (32 - address.PrefixLength)) - 1)) | 1);
+        const uint32_t hostAddr = ntohl(address.Address.Ipv4.sin_addr.s_addr);
+        const uint32_t mask = (address.PrefixLength == 0) ? 0u : ~((1u << (32u - address.PrefixLength)) - 1u);
+        gatewayAddr.Ipv4.sin_addr.s_addr = htonl((hostAddr & mask) | 1u);
         route = EndpointRoute::DefaultRoute(AF_INET, gatewayAddr);
     }
 

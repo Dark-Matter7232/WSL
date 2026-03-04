@@ -4725,7 +4725,7 @@ class VirtioProxyTests
         }
 
         // Verify AAAA record resolution works
-        VERIFY_ARE_EQUAL(LxsstuLaunchWsl(L"host -t AAAA bing.com"), 0);
+        VerifyDigDnsResolution(L"dig +short +time=5 AAAA bing.com");
     }
 };
 } // namespace NetworkTests

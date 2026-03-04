@@ -78,6 +78,11 @@ void NETIOAPI_API_ VirtioNetworking::OnNetworkConnectivityChange(PVOID context, 
 
 HRESULT VirtioNetworking::HandlePortNotification(const SOCKADDR_INET& addr, int protocol, bool allocate) const noexcept
 {
+    if (addr.si_family == AF_INET6 && WI_IsFlagClear(m_flags, VirtioNetworkingFlags::Ipv6))
+    {
+        return S_OK;
+    }
+
     int result = 0;
     const auto ipAddress = (addr.si_family == AF_INET) ? reinterpret_cast<const void*>(&addr.Ipv4.sin_addr)
                                                        : reinterpret_cast<const void*>(&addr.Ipv6.sin6_addr);
@@ -274,6 +279,8 @@ void VirtioNetworking::SetupLoopbackDevice()
 
 void VirtioNetworking::SendDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family, hns::ModifyRequestType requestType)
 {
+    WI_ASSERT(family == AF_INET || WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6));
+
     if (gateway.empty())
     {
         return;
@@ -293,6 +300,8 @@ void VirtioNetworking::SendDefaultRoute(const std::wstring& gateway, ADDRESS_FAM
 
 void VirtioNetworking::UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family)
 {
+    WI_ASSERT(family == AF_INET || WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6));
+
     auto& trackedRoute = (family == AF_INET) ? m_trackedDefaultRoute : m_trackedDefaultRouteV6;
     if (gateway == trackedRoute)
     {
@@ -345,6 +354,8 @@ void VirtioNetworking::UpdateIpv4Address(const networking::EndpointIpAddress& ip
 
 void VirtioNetworking::SendIpv6Address(const networking::EndpointIpAddress& ipAddress, hns::ModifyRequestType requestType)
 {
+    WI_ASSERT(WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6));
+
     if (ipAddress.AddressString.empty())
     {
         return;
@@ -362,6 +373,8 @@ void VirtioNetworking::SendIpv6Address(const networking::EndpointIpAddress& ipAd
 
 void VirtioNetworking::UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress)
 {
+    WI_ASSERT(WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6));
+
     if (ipAddress == m_trackedIpv6Address)
     {
         return;
