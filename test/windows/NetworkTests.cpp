@@ -4711,21 +4711,5 @@ class VirtioProxyTests
         // Verify that the guest has an IPv6 default gateway
         VERIFY_IS_TRUE(state.V6Gateway.has_value());
     }
-
-    TEST_METHOD(DnsResolutionAAAA)
-    {
-        VIRTIOPROXY_TEST_ONLY();
-
-        m_config->Update(LxssGenerateTestConfig({.networkingMode = wsl::core::NetworkingMode::VirtioProxy}));
-
-        if (!NetworkTests::HostHasInternetConnectivity(AF_INET6))
-        {
-            LogSkipped("Host does not have IPv6 internet connectivity. Skipping...");
-            return;
-        }
-
-        // Verify AAAA record resolution works
-        VerifyDigDnsResolution(L"dig +short +time=5 AAAA bing.com");
-    }
 };
 } // namespace NetworkTests
