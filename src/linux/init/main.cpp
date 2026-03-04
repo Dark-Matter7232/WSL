@@ -114,6 +114,7 @@ struct VmConfiguration
     bool EnableCrashDumpCollection = false;
     std::string KernelModulesPath;
     LX_MINI_INIT_NETWORKING_MODE NetworkingMode = LxMiniInitNetworkingModeNone;
+    UINT64 VirtioFsDaxSize = 0;
 };
 
 int g_LogFd = STDERR_FILENO;
@@ -2357,6 +2358,8 @@ Return Value:
 
 try
 {
+    LOG_INFO("MountDiskPartition DevicePath {} Type {} Target {} Flags {:x} Options {}", DevicePath, Type, Target, Flags, Options);
+
     *Step = LxMiniInitMountStepFindPartition;
     if (!wsl::shared::string::StartsWith(DevicePath, DEVFS_PATH "/"))
     {
@@ -3189,6 +3192,8 @@ Return Value:
 try
 {
 
+    LOG_INFO("ProcessMessage: type {}", Type);
+
     //
     // Validate the message and handle operations that do not require creating a child process.
     //
@@ -3277,6 +3282,21 @@ try
             LOG_WARNING("{} - many features will be disabled", WSL_SAFE_MODE_WARNING);
             Config.EnableSafeMode = true;
         }
+
+        //
+        // Get VirtioFS dax size and pass it to the config.
+        // This parameters is used also to disable VirtioFS dax if the size is 0.
+        //
+
+        if (EarlyConfig->VirtioFsDaxSize != 0)
+        {
+            LOG_INFO("VirtioFS DAX size is set to {}MB", EarlyConfig->VirtioFsDaxSize);
+        }
+        else
+        {
+            LOG_INFO("VirtioFS DAX is disabled");
+        }   
+        Config.VirtioFsDaxSize = EarlyConfig->VirtioFsDaxSize;
 
         //
         // Establish the connection for the guest network service.
