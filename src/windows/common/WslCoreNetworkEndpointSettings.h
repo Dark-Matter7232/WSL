@@ -309,7 +309,7 @@ struct NetworkSettings
     GUID InterfaceGuid{};
     EndpointIpAddress PreferredIpAddress{};
     EndpointIpAddress PreferredIpv6Address{};
-    std::set<EndpointIpAddress> IpAddresses{}; // Does not include PreferredIpAddress.
+    std::set<EndpointIpAddress> IpAddresses{}; // Does not include PreferredIpAddress or PreferredIpv6Address.
     std::set<EndpointRoute> Routes{};
     std::wstring MacAddress;
     IF_INDEX InterfaceIndex = 0;

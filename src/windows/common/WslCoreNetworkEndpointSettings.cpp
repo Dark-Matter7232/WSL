@@ -63,7 +63,7 @@ std::shared_ptr<wsl::core::networking::NetworkSettings> wsl::core::networking::G
     }
     if (firstIpv4Address)
     {
-        address.Address = *reinterpret_cast<SOCKADDR_INET*>(firstIpv4Address->Address.lpSockaddr);
+        address.Address.Ipv4 = *reinterpret_cast<SOCKADDR_IN*>(firstIpv4Address->Address.lpSockaddr);
         address.AddressString = windows::common::string::SockAddrInetToWstring(address.Address);
         address.PrefixLength = firstIpv4Address->OnLinkPrefixLength;
     }
@@ -75,10 +75,10 @@ std::shared_ptr<wsl::core::networking::NetworkSettings> wsl::core::networking::G
     {
         if (nextUnicastAddress->Address.lpSockaddr->sa_family == AF_INET6)
         {
-            const auto& sin6Addr = reinterpret_cast<SOCKADDR_IN6*>(nextUnicastAddress->Address.lpSockaddr)->sin6_addr;
-            if (!IN6_IS_ADDR_LINKLOCAL(&sin6Addr) && !IN6_IS_ADDR_LOOPBACK(&sin6Addr))
+            const auto& sin6 = *reinterpret_cast<SOCKADDR_IN6*>(nextUnicastAddress->Address.lpSockaddr);
+            if (!IN6_IS_ADDR_LINKLOCAL(&sin6.sin6_addr) && !IN6_IS_ADDR_LOOPBACK(&sin6.sin6_addr))
             {
-                ipv6Address.Address = *reinterpret_cast<SOCKADDR_INET*>(nextUnicastAddress->Address.lpSockaddr);
+                ipv6Address.Address.Ipv6 = sin6;
                 ipv6Address.AddressString = windows::common::string::SockAddrInetToWstring(ipv6Address.Address);
                 ipv6Address.PrefixLength = nextUnicastAddress->OnLinkPrefixLength;
                 break;
@@ -101,7 +101,9 @@ std::shared_ptr<wsl::core::networking::NetworkSettings> wsl::core::networking::G
     const auto v4Gateway = findGatewayAddress(bestInterface->FirstGatewayAddress, AF_INET);
     if (v4Gateway)
     {
-        route = EndpointRoute::DefaultRoute(AF_INET, *reinterpret_cast<SOCKADDR_INET*>(v4Gateway->Address.lpSockaddr));
+        SOCKADDR_INET v4NextHop{};
+        v4NextHop.Ipv4 = *reinterpret_cast<SOCKADDR_IN*>(v4Gateway->Address.lpSockaddr);
+        route = EndpointRoute::DefaultRoute(AF_INET, v4NextHop);
     }
     else if (address.Address.si_family == AF_INET)
     {
@@ -118,7 +120,9 @@ std::shared_ptr<wsl::core::networking::NetworkSettings> wsl::core::networking::G
     const auto v6Gateway = findGatewayAddress(bestInterface->FirstGatewayAddress, AF_INET6);
     if (v6Gateway)
     {
-        v6Route = EndpointRoute::DefaultRoute(AF_INET6, *reinterpret_cast<SOCKADDR_INET*>(v6Gateway->Address.lpSockaddr));
+        SOCKADDR_INET v6NextHop{};
+        v6NextHop.Ipv6 = *reinterpret_cast<SOCKADDR_IN6*>(v6Gateway->Address.lpSockaddr);
+        v6Route = EndpointRoute::DefaultRoute(AF_INET6, v6NextHop);
     }
 
     return std::make_shared<NetworkSettings>(

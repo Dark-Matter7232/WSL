@@ -230,12 +230,18 @@ try
     // Update IPv6 address if needed.
     if (!m_networkSettings || networkSettings->PreferredIpv6Address != m_networkSettings->PreferredIpv6Address)
     {
+        if (m_networkSettings)
+        {
+            UpdateIpv6Address(m_networkSettings->PreferredIpv6Address, hns::ModifyRequestType::Remove);
+        }
+
         UpdateIpv6Address(networkSettings->PreferredIpv6Address);
     }
 
     // Send default route update if needed.
     if (default_route != m_trackedDefaultRoute)
     {
+        UpdateDefaultRoute(m_trackedDefaultRoute, AF_INET, hns::ModifyRequestType::Remove);
         m_trackedDefaultRoute = default_route;
         UpdateDefaultRoute(default_route, AF_INET);
     }
@@ -243,6 +249,7 @@ try
     // Send IPv6 default route update if needed.
     if (default_route_v6 != m_trackedDefaultRouteV6)
     {
+        UpdateDefaultRoute(m_trackedDefaultRouteV6, AF_INET6, hns::ModifyRequestType::Remove);
         m_trackedDefaultRouteV6 = default_route_v6;
         UpdateDefaultRoute(default_route_v6, AF_INET6);
     }
@@ -295,7 +302,7 @@ void VirtioNetworking::SetupLoopbackDevice()
     m_gnsChannel.SendNetworkDeviceMessage(loopbackType, ToJsonW(createLoopbackDevice).c_str());
 }
 
-void VirtioNetworking::UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family)
+void VirtioNetworking::UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family, hns::ModifyRequestType requestType)
 {
     if (gateway.empty())
     {
@@ -308,7 +315,7 @@ void VirtioNetworking::UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_F
     route.Family = family;
 
     hns::ModifyGuestEndpointSettingRequest<hns::Route> request;
-    request.RequestType = hns::ModifyRequestType::Add;
+    request.RequestType = requestType;
     request.ResourceType = hns::GuestEndpointResourceType::Route;
     request.Settings = route;
     m_gnsChannel.SendHnsNotification(ToJsonW(request).c_str(), m_adapterId.value());
@@ -339,7 +346,7 @@ void VirtioNetworking::UpdateIpv4Address(const networking::EndpointIpAddress& ip
     m_gnsChannel.SendEndpointState(endpointProperties);
 }
 
-void VirtioNetworking::UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress)
+void VirtioNetworking::UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress, hns::ModifyRequestType requestType)
 {
     if (ipAddress.AddressString.empty())
     {
@@ -348,7 +355,7 @@ void VirtioNetworking::UpdateIpv6Address(const networking::EndpointIpAddress& ip
 
     // The HNSEndpoint schema doesn't support IPv6 addresses, so use ModifyGuestEndpointSettingRequest.
     hns::ModifyGuestEndpointSettingRequest<hns::IPAddress> request;
-    request.RequestType = hns::ModifyRequestType::Add;
+    request.RequestType = requestType;
     request.ResourceType = hns::GuestEndpointResourceType::IPAddress;
     request.Settings.Address = ipAddress.AddressString;
     request.Settings.Family = ipAddress.Address.si_family;

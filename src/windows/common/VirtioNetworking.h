@@ -43,10 +43,11 @@ private:
     int ModifyOpenPorts(_In_ PCWSTR tag, _In_ const SOCKADDR_INET& addr, _In_ int protocol, _In_ bool isOpen) const;
     void RefreshGuestConnection() noexcept;
     void SetupLoopbackDevice();
-    void UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family);
+    void UpdateDefaultRoute(
+        const std::wstring& gateway, ADDRESS_FAMILY family, wsl::shared::hns::ModifyRequestType requestType = wsl::shared::hns::ModifyRequestType::Add);
     void UpdateDnsSettings(const networking::DnsInfo& dns);
     void UpdateIpv4Address(const networking::EndpointIpAddress& ipAddress);
-    void UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress);
+    void UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress, wsl::shared::hns::ModifyRequestType requestType = wsl::shared::hns::ModifyRequestType::Add);
     void UpdateMtu(ULONG mtu);
 
     mutable wil::srwlock m_lock;
