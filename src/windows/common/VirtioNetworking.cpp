@@ -56,7 +56,7 @@ void VirtioNetworking::TraceLoggingRundown() noexcept
 void VirtioNetworking::FillInitialConfiguration(LX_MINI_INIT_NETWORKING_CONFIGURATION& message)
 {
     message.NetworkingMode = LxMiniInitNetworkingModeVirtioProxy;
-    message.DisableIpv6 = false;
+    message.DisableIpv6 = WI_IsFlagClear(m_flags, VirtioNetworkingFlags::Ipv6);
     message.EnableDhcpClient = false;
     message.PortTrackerType = LX_MINI_INIT_PORT_TRACKER_TYPE::LxMiniInitPortTrackerTypeMirrored;
 }
@@ -178,13 +178,17 @@ try
     };
 
     appendOption(L"client_ip", networkSettings->PreferredIpAddress.AddressString);
-    appendOption(L"client_ip_ipv6", networkSettings->PreferredIpv6Address.AddressString);
     appendOption(L"client_mac", networkSettings->MacAddress);
+    if (WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6))
+    {
+        appendOption(L"client_ip_ipv6", networkSettings->PreferredIpv6Address.AddressString);
+    }
 
     // N.B. The devicehost only uses gateway addresses from the device options string for DHCP responses.
     // Since DHCP is not currently enabled, gateway_ip and gateway_ipv6 are omitted from the options.
     std::wstring default_route = networkSettings->GetBestGatewayAddressString();
-    std::wstring default_route_v6 = networkSettings->GetBestGatewayV6AddressString();
+    std::wstring default_route_v6 =
+        WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6) ? networkSettings->GetBestGatewayV6AddressString() : std::wstring{};
 
     networking::DnsInfo currentDns{};
     if (WI_IsFlagSet(m_flags, VirtioNetworkingFlags::DnsTunneling))
@@ -193,8 +197,9 @@ try
     }
     else
     {
-        currentDns = networking::HostDnsInfo::GetDnsSettings(
-            networking::DnsSettingsFlags::IncludeVpn | networking::DnsSettingsFlags::IncludeIpv6Servers);
+        wsl::core::networking::DnsSettingsFlags dnsFlags = networking::DnsSettingsFlags::IncludeVpn;
+        WI_SetFlagIf(dnsFlags, networking::DnsSettingsFlags::IncludeIpv6Servers, WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6));
+        currentDns = networking::HostDnsInfo::GetDnsSettings(dnsFlags);
     }
 
     const auto minMtu = GetMinimumConnectedInterfaceMtu();
@@ -221,52 +226,17 @@ try
         }
     }
 
-    // Update IP address if needed.
-    if (!m_networkSettings || networkSettings->PreferredIpAddress != m_networkSettings->PreferredIpAddress)
-    {
-        UpdateIpv4Address(networkSettings->PreferredIpAddress);
-    }
+    UpdateIpv4Address(networkSettings->PreferredIpAddress);
+    UpdateDefaultRoute(default_route, AF_INET);
 
-    // Update IPv6 address if needed.
-    if (!m_networkSettings || networkSettings->PreferredIpv6Address != m_networkSettings->PreferredIpv6Address)
+    if (WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6))
     {
-        if (m_networkSettings)
-        {
-            UpdateIpv6Address(m_networkSettings->PreferredIpv6Address, hns::ModifyRequestType::Remove);
-        }
-
         UpdateIpv6Address(networkSettings->PreferredIpv6Address);
-    }
-
-    // Send default route update if needed.
-    if (default_route != m_trackedDefaultRoute)
-    {
-        UpdateDefaultRoute(m_trackedDefaultRoute, AF_INET, hns::ModifyRequestType::Remove);
-        m_trackedDefaultRoute = default_route;
-        UpdateDefaultRoute(default_route, AF_INET);
-    }
-
-    // Send IPv6 default route update if needed.
-    if (default_route_v6 != m_trackedDefaultRouteV6)
-    {
-        UpdateDefaultRoute(m_trackedDefaultRouteV6, AF_INET6, hns::ModifyRequestType::Remove);
-        m_trackedDefaultRouteV6 = default_route_v6;
         UpdateDefaultRoute(default_route_v6, AF_INET6);
     }
 
-    // Send DNS update if needed.
-    if (currentDns != m_trackedDnsSettings)
-    {
-        m_trackedDnsSettings = currentDns;
-        UpdateDnsSettings(currentDns);
-    }
-
-    // Send MTU update if needed.
-    if (minMtu && minMtu.value() != m_networkMtu)
-    {
-        m_networkMtu = minMtu.value();
-        UpdateMtu(m_networkMtu);
-    }
+    UpdateDnsSettings(currentDns);
+    UpdateMtu(minMtu);
 
     m_networkSettings = std::move(networkSettings);
 }
@@ -302,7 +272,7 @@ void VirtioNetworking::SetupLoopbackDevice()
     m_gnsChannel.SendNetworkDeviceMessage(loopbackType, ToJsonW(createLoopbackDevice).c_str());
 }
 
-void VirtioNetworking::UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family, hns::ModifyRequestType requestType)
+void VirtioNetworking::SendDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family, hns::ModifyRequestType requestType)
 {
     if (gateway.empty())
     {
@@ -321,8 +291,28 @@ void VirtioNetworking::UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_F
     m_gnsChannel.SendHnsNotification(ToJsonW(request).c_str(), m_adapterId.value());
 }
 
+void VirtioNetworking::UpdateDefaultRoute(const std::wstring& gateway, ADDRESS_FAMILY family)
+{
+    auto& trackedRoute = (family == AF_INET) ? m_trackedDefaultRoute : m_trackedDefaultRouteV6;
+    if (gateway == trackedRoute)
+    {
+        return;
+    }
+
+    SendDefaultRoute(trackedRoute, family, hns::ModifyRequestType::Remove);
+    trackedRoute = gateway;
+    SendDefaultRoute(gateway, family, hns::ModifyRequestType::Add);
+}
+
 void VirtioNetworking::UpdateDnsSettings(const networking::DnsInfo& dns)
 {
+    if (dns == m_trackedDnsSettings)
+    {
+        return;
+    }
+
+    m_trackedDnsSettings = dns;
+
     hns::ModifyGuestEndpointSettingRequest<hns::DNS> notification{};
     notification.RequestType = hns::ModifyRequestType::Update;
     notification.ResourceType = hns::GuestEndpointResourceType::DNS;
@@ -332,6 +322,13 @@ void VirtioNetworking::UpdateDnsSettings(const networking::DnsInfo& dns)
 
 void VirtioNetworking::UpdateIpv4Address(const networking::EndpointIpAddress& ipAddress)
 {
+    if (ipAddress == m_trackedIpv4Address)
+    {
+        return;
+    }
+
+    m_trackedIpv4Address = ipAddress;
+
     if (ipAddress.AddressString.empty())
     {
         return;
@@ -346,7 +343,7 @@ void VirtioNetworking::UpdateIpv4Address(const networking::EndpointIpAddress& ip
     m_gnsChannel.SendEndpointState(endpointProperties);
 }
 
-void VirtioNetworking::UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress, hns::ModifyRequestType requestType)
+void VirtioNetworking::SendIpv6Address(const networking::EndpointIpAddress& ipAddress, hns::ModifyRequestType requestType)
 {
     if (ipAddress.AddressString.empty())
     {
@@ -363,12 +360,31 @@ void VirtioNetworking::UpdateIpv6Address(const networking::EndpointIpAddress& ip
     m_gnsChannel.SendHnsNotification(ToJsonW(request).c_str(), m_adapterId.value());
 }
 
-void VirtioNetworking::UpdateMtu(ULONG mtu)
+void VirtioNetworking::UpdateIpv6Address(const networking::EndpointIpAddress& ipAddress)
 {
+    if (ipAddress == m_trackedIpv6Address)
+    {
+        return;
+    }
+
+    SendIpv6Address(m_trackedIpv6Address, hns::ModifyRequestType::Remove);
+    m_trackedIpv6Address = ipAddress;
+    SendIpv6Address(ipAddress, hns::ModifyRequestType::Add);
+}
+
+void VirtioNetworking::UpdateMtu(std::optional<ULONG> mtu)
+{
+    if (!mtu || mtu.value() == m_networkMtu)
+    {
+        return;
+    }
+
+    m_networkMtu = mtu.value();
+
     hns::ModifyGuestEndpointSettingRequest<hns::NetworkInterface> notification{};
     notification.ResourceType = hns::GuestEndpointResourceType::Interface;
     notification.RequestType = hns::ModifyRequestType::Update;
     notification.Settings.Connected = true;
-    notification.Settings.NlMtu = mtu;
+    notification.Settings.NlMtu = m_networkMtu;
     m_gnsChannel.SendHnsNotification(ToJsonW(notification).c_str(), m_adapterId.value());
 }
