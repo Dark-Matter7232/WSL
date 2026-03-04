@@ -189,9 +189,8 @@ try
         appendOption(L"client_ip_ipv6", networkSettings->PreferredIpv6Address.AddressString);
     }
 
-    // N.B. The devicehost only uses gateway addresses from the device options string for DHCP responses.
-    // Since DHCP is not currently enabled, gateway_ip and gateway_ipv6 are omitted from the options.
     std::wstring default_route = networkSettings->GetBestGatewayAddressString();
+    appendOption(L"gateway_ip", default_route);
     std::wstring default_route_v6 =
         WI_IsFlagSet(m_flags, VirtioNetworkingFlags::Ipv6) ? networkSettings->GetBestGatewayV6AddressString() : std::wstring{};
 
