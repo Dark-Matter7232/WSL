@@ -380,7 +380,7 @@ Return Value:
     if (WSL_USE_VIRTIO_9P())
     {
         Source = Admin ? LX_INIT_DRVFS_ADMIN_VIRTIO_TAG : LX_INIT_DRVFS_VIRTIO_TAG;
-        MountOptions = std::format("msize=262144,trans=virtio,{}", Options);
+        MountOptions = std::format("msize=512000,trans=virtio,{}", Options);
         return MountWithRetry(Source, Target, PLAN9_FS_TYPE, MountOptions.c_str(), ExitCode);
     }
     else
@@ -393,7 +393,7 @@ Return Value:
         }
 
         MountOptions =
-            std::format("msize={},trans=fd,rfdno={},wfdno={},{}", LX_INIT_UTILITY_VM_PLAN9_BUFFER_SIZE, Fd.get(), Fd.get(), Options);
+            std::format("msize={},trans=fd,rfdno={},wfdno={},{}", LX_INIT_UTILITY_VM_PLAN9_MSIZE_FD, Fd.get(), Fd.get(), Options);
 
         return MountFilesystem(PLAN9_FS_TYPE, Source, Target, MountOptions.c_str(), ExitCode);
     }

@@ -1403,7 +1403,7 @@ private:
     }
 
     static constexpr UINT32 MinimumRequestBufferSize = 4096;
-    static constexpr UINT32 MaximumRequestBufferSize = 256 * 1024;
+    static constexpr UINT32 MaximumRequestBufferSize = 1048576;
     static constexpr UINT32 InitialResponseBufferSize = 64;
 
     AsyncLock m_SocketLock;

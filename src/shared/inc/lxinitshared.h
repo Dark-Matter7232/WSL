@@ -125,7 +125,8 @@ Abstract:
 // N.B. The kernel doubles this value.
 //
 
-#define LX_INIT_UTILITY_VM_PLAN9_BUFFER_SIZE (65536)
+#define LX_INIT_UTILITY_VM_PLAN9_BUFFER_SIZE (128 * 1024)
+#define LX_INIT_UTILITY_VM_PLAN9_MSIZE_FD (256 * 1024)
 
 //
 // Default buffer size for relaying.
