@@ -1083,6 +1083,146 @@ class UnitTests
         VERIFY_ARE_EQUAL(err, L"bsdtar: Error opening archive: Unrecognized archive format\n");
     }
 
+    TEST_METHOD(ImportDistroWithFsType)
+    {
+        WSL2_TEST_ONLY();
+
+        //
+        // Test importing a distribution with custom filesystem type.
+        // Validates ext4, btrfs, and xfs filesystem types.
+        //
+
+        auto validateOutput = [](LPCWSTR commandLine, LPCWSTR expectedOutput, DWORD expectedExitCode = 0) {
+            auto [out, err] = LxsstuLaunchWslAndCaptureOutput(commandLine, expectedExitCode);
+            VERIFY_ARE_EQUAL(expectedOutput, out);
+        };
+
+        auto testFsType = [&](LPCWSTR fsType, LPCWSTR expectedFsType) {
+            const auto distroName = std::format(L"fstype-test-{}", fsType);
+
+            auto cleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&]() {
+                LxsstuLaunchWsl(std::format(L"--unregister {}", distroName));
+                std::filesystem::remove_all(LXSST_IMPORT_DISTRO_TEST_DIR);
+            });
+
+            // Import with custom fs type
+            validateOutput(
+                std::format(L"--import {} {} \"{}\" --version 2 --fs-type {}", distroName, LXSST_IMPORT_DISTRO_TEST_DIR, g_testDistroPath, fsType).c_str(),
+                L"The operation completed successfully. \r\n",
+                0);
+
+            // Verify the filesystem type is correct by checking /etc/fstab or mount output
+            auto [mountOut, _] = LxsstuLaunchWslAndCaptureOutput(std::format(L"-d {} -- mount | grep ' / '", distroName));
+            VERIFY_IS_TRUE(mountOut.find(expectedFsType) != std::wstring::npos);
+
+            // Cleanup
+            WslShutdown();
+        };
+
+        // Test ext4 (default)
+        testFsType(L"ext4", L"ext4");
+
+        // Test btrfs
+        testFsType(L"btrfs", L"btrfs");
+
+        // Test xfs
+        testFsType(L"xfs", L"xfs");
+    }
+
+    TEST_METHOD(ImportDistroWithFsMountOptions)
+    {
+        WSL2_TEST_ONLY();
+
+        //
+        // Test importing a distribution with custom filesystem mount options.
+        // Covers ext4, btrfs (with subvol), and xfs filesystem types.
+        //
+
+        auto importAndValidate = [&](LPCWSTR testName, const std::wstring& extraArgs, const std::vector<std::wstring>& expectedStrings) {
+            const auto distroName = std::format(L"fsmount-test-{}", testName);
+
+            auto cleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&]() {
+                LxsstuLaunchWsl(std::format(L"--unregister {}", distroName));
+                std::filesystem::remove_all(LXSST_IMPORT_DISTRO_TEST_DIR);
+            });
+
+            auto [out, err] = LxsstuLaunchWslAndCaptureOutput(
+                std::format(L"--import {} {} \"{}\" --version 2 {}", distroName, LXSST_IMPORT_DISTRO_TEST_DIR, g_testDistroPath, extraArgs),
+                0);
+            VERIFY_ARE_EQUAL(out, L"The operation completed successfully. \r\n");
+
+            auto [mountOut, _] = LxsstuLaunchWslAndCaptureOutput(std::format(L"-d {} -- mount | grep ' / '", distroName));
+            for (const auto& expected : expectedStrings)
+            {
+                VERIFY_IS_TRUE(mountOut.find(expected) != std::wstring::npos);
+            }
+
+            WslShutdown();
+        };
+
+        // Test ext4 with kernel mount options
+        importAndValidate(L"ext4", L"--fs-mount-options discard,data=writeback", {L"ext4", L"data=writeback"});
+
+        // Test btrfs with compress, subvol, and ssd options
+        importAndValidate(L"btrfs", L"--fs-type btrfs --fs-mount-options compress=zstd,subvol=@,ssd",
+            {L"btrfs", L"compress=zstd", L"subvol=/@", L"ssd"});
+
+        // Test xfs with quota options (uquota/gquota are displayed as usrquota/grpquota by mount)
+        importAndValidate(L"xfs", L"--fs-type xfs --fs-mount-options uquota,gquota",
+            {L"xfs", L"usrquota", L"grpquota"});
+    }
+
+    TEST_METHOD(ManageSetFsMountOptions)
+    {
+        WSL2_TEST_ONLY();
+
+        //
+        // Test the --manage --set-fs-mount-options command across different filesystem types.
+        //
+
+        auto testManageMountOptions = [&](LPCWSTR testName, const std::wstring& importExtraArgs,
+            const std::wstring& mountOptions, const std::vector<std::wstring>& expectedStrings) {
+            const auto distroName = std::format(L"manage-fsmount-{}", testName);
+
+            auto cleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&]() {
+                LxsstuLaunchWsl(std::format(L"--unregister {}", distroName));
+                std::filesystem::remove_all(LXSST_IMPORT_DISTRO_TEST_DIR);
+            });
+
+            // Import a distribution
+            auto [out, err] = LxsstuLaunchWslAndCaptureOutput(
+                std::format(L"--import {} {} \"{}\" --version 2 {}", distroName, LXSST_IMPORT_DISTRO_TEST_DIR, g_testDistroPath, importExtraArgs),
+                0);
+            VERIFY_ARE_EQUAL(out, L"The operation completed successfully. \r\n");
+
+            // Set the mount options using --manage
+            WslShutdown();
+            std::tie(out, err) = LxsstuLaunchWslAndCaptureOutput(
+                std::format(L"--manage {} --set-fs-mount-options {}", distroName, mountOptions),
+                0);
+            VERIFY_ARE_EQUAL(out, L"The operation completed successfully. \r\n");
+
+            // Verify the mount options are applied after restart
+            auto [mountOut, _] = LxsstuLaunchWslAndCaptureOutput(std::format(L"-d {} -- mount | grep ' / '", distroName));
+            for (const auto& expected : expectedStrings)
+            {
+                VERIFY_IS_TRUE(mountOut.find(expected) != std::wstring::npos);
+            }
+
+            WslShutdown();
+        };
+
+        // Test changing data options on ext4
+        testManageMountOptions(L"ext4", L"--fs-type ext4", L"data=journal", {L"ext4", L"data=journal"});
+
+        // Test changing compress option on btrfs
+        testManageMountOptions(L"btrfs", L"--fs-type btrfs", L"compress=lzo", {L"btrfs", L"compress=lzo"});
+
+        // Test enabling quotas on xfs
+        testManageMountOptions(L"xfs", L"--fs-type xfs", L"uquota,gquota", {L"xfs", L"usrquota", L"grpquota"});
+    }
+
+
     TEST_METHOD(AppxDistroDeletion)
     {
         // Create a dummy distro registration
@@ -1351,6 +1491,11 @@ class UnitTests
             L"Wsl/Service/WSL_E_DISTRO_NOT_FOUND");
 
         ValidateErrorMessage(L"--manage test_distro --resize foo", L"Invalid size: foo", L"Wsl/E_INVALIDARG");
+
+        ValidateErrorMessage(
+            L"--manage DoesNotExist --set-fs-mount-options discard",
+            L"There is no distribution with the supplied name.",
+            L"Wsl/Service/WSL_E_DISTRO_NOT_FOUND");
 
         ValidateErrorMessage(
             L"--install --distribution debian --no-distribution",
