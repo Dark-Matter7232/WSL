@@ -33,6 +33,8 @@ include(FetchContent)
 
 set(FETCHCONTENT_BASE_DIR ${CMAKE_BINARY_DIR}/_deps/${TARGET_PLATFORM})
 
+# N.B. Changes to any of the FetchContent dependencies below (GSL, nlohmannjson) must be reflected in cgmanifest.json
+
 FetchContent_Declare(GSL
                      URL https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.tar.gz
                      URL_HASH SHA256=f0e32cb10654fea91ad56bde89170d78cfbf4363ee0b01d8f097de2ba49f6ce9)
@@ -155,7 +157,6 @@ set (GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
 
 set(PACKAGE_CERTIFICATE ${GENERATED_DIR}/dev-cert.pfx)
-file(CREATE_LINK ${WSL_DEVICE_HOST_SOURCE_DIR}/bin/${TARGET_PLATFORM}/wsldevicehost.dll ${BIN}/wsldevicehost.dll)
 file(CREATE_LINK ${WSLG_SOURCE_DIR}/${TARGET_PLATFORM}/${WSLG_TS_PLUGIN_DLL} ${BIN}/${WSLG_TS_PLUGIN_DLL})
 file(CREATE_LINK ${WSLDEPS_SOURCE_DIR}/bin/wsldeps.dll ${BIN}/wsldeps.dll)
 
@@ -186,10 +187,12 @@ endif()
 
 if (${TARGET_PLATFORM} STREQUAL "x64")
     add_compile_definitions(_AMD64_)
+    set(DISTRO_HOSTTYPE x86_64)
 endif()
 
 if (${TARGET_PLATFORM} STREQUAL "arm64")
     add_compile_definitions(_ARM64_)
+    set(DISTRO_HOSTTYPE aarch64)
 endif()
 
 add_definitions(/sdl) # Default-initialize class members
@@ -212,6 +215,7 @@ add_compile_definitions(UNICODE
                         WSL_PACKAGE_VERSION_MAJOR=${PACKAGE_VERSION_MAJOR}
                         WSL_PACKAGE_VERSION_MINOR=${PACKAGE_VERSION_MINOR}
                         WSL_PACKAGE_VERSION_REVISION=${PACKAGE_VERSION_REVISION}
+                        DISTRO_HOSTTYPE="${DISTRO_HOSTTYPE}"
                         WSL_BUILD_WSL_SETTINGS=${WSL_BUILD_WSL_SETTINGS})
 
 if (${OFFICIAL_BUILD})
