@@ -129,6 +129,11 @@ void WSLCContainerLauncher::SetDefaultStopSignal(WSLCSignal Signal)
     m_stopSignal = Signal;
 }
 
+void WSLCContainerLauncher::SetShmSize(int64_t ShmSize)
+{
+    m_shmSize = ShmSize;
+}
+
 void WSLCContainerLauncher::SetEntrypoint(std::vector<std::string>&& entrypoint)
 {
     m_entrypoint = std::move(entrypoint);
@@ -137,6 +142,11 @@ void WSLCContainerLauncher::SetEntrypoint(std::vector<std::string>&& entrypoint)
 void WSLCContainerLauncher::SetContainerFlags(WSLCContainerFlags Flags)
 {
     m_containerFlags = Flags;
+}
+
+void WSLCContainerLauncher::SetContainerNetworkName(std::string&& Name)
+{
+    m_containerNetworkName = std::move(Name);
 }
 
 void WSLCContainerLauncher::SetHostname(std::string&& Hostname)
@@ -162,6 +172,29 @@ void WSLCContainerLauncher::SetDnsSearchDomains(std::vector<std::string>&& DnsSe
 void WSLCContainerLauncher::SetDnsOptions(std::vector<std::string>&& DnsOptions)
 {
     m_dnsOptions = std::move(DnsOptions);
+}
+
+void WSLCContainerLauncher::SetMemoryLimit(std::int64_t Bytes)
+{
+    m_memoryBytes = Bytes;
+}
+
+void WSLCContainerLauncher::SetNanoCpus(std::int64_t NanoCpus)
+{
+    m_nanoCpus = NanoCpus;
+}
+
+void WSLCContainerLauncher::AddUlimit(const std::string& Name, std::int64_t Soft, std::int64_t Hard)
+{
+    // Store a copy of the name string to keep the WSLCUlimit pointer valid.
+    const auto& name = m_ulimitNames.emplace_back(Name);
+
+    WSLCUlimit ulimit{};
+    ulimit.Name = name.c_str();
+    ulimit.Soft = Soft;
+    ulimit.Hard = Hard;
+
+    m_ulimits.push_back(ulimit);
 }
 
 void wsl::windows::common::WSLCContainerLauncher::AddVolume(const std::wstring& HostPath, const std::string& ContainerPath, bool ReadOnly)
@@ -217,6 +250,11 @@ void wsl::windows::common::WSLCContainerLauncher::AddTmpfs(const std::string& Co
     m_tmpfsMounts.push_back(tmpfs);
 }
 
+void wsl::windows::common::WSLCContainerLauncher::AddAdditionalNetwork(const std::string& Name)
+{
+    m_additionalNetworks.push_back(Name);
+}
+
 std::pair<HRESULT, std::optional<RunningWSLCContainer>> WSLCContainerLauncher::LaunchNoThrow(IWSLCSession& Session, WSLCContainerStartFlags Flags)
 {
     auto [result, container] = CreateNoThrow(Session);
@@ -254,6 +292,7 @@ std::pair<HRESULT, std::optional<RunningWSLCContainer>> WSLCContainerLauncher::C
     options.PortsCount = static_cast<ULONG>(m_ports.size());
     options.StopSignal = m_stopSignal;
     options.Flags = m_containerFlags;
+    options.ShmSize = m_shmSize;
 
     if (!entrypointStorage.empty())
     {
@@ -320,7 +359,28 @@ std::pair<HRESULT, std::optional<RunningWSLCContainer>> WSLCContainerLauncher::C
     options.TmpfsCount = static_cast<ULONG>(m_tmpfsMounts.size());
     options.Tmpfs = m_tmpfsMounts.size() > 0 ? m_tmpfsMounts.data() : nullptr;
 
-    // TODO: Support volumes, ports, flags, shm size, container networking mode, etc.
+    std::vector<WSLCNetworkAttachment> networkAttachments;
+    if (m_containerNetworkType == WSLCContainerNetworkTypeCustom)
+    {
+        networkAttachments.push_back({m_containerNetworkName.c_str(), nullptr});
+    }
+    for (const auto& e : m_additionalNetworks)
+    {
+        networkAttachments.push_back({e.c_str(), nullptr});
+    }
+
+    if (!networkAttachments.empty())
+    {
+        options.ContainerNetwork.Networks = networkAttachments.data();
+        options.ContainerNetwork.NetworksCount = static_cast<ULONG>(networkAttachments.size());
+    }
+
+    options.MemoryBytes = m_memoryBytes;
+    options.NanoCpus = m_nanoCpus;
+    options.UlimitsCount = static_cast<ULONG>(m_ulimits.size());
+    options.Ulimits = m_ulimits.size() > 0 ? m_ulimits.data() : nullptr;
+
+    // TODO: Support volumes, ports, flags, container networking mode, etc.
     wil::com_ptr<IWSLCContainer> container;
     auto result = Session.CreateContainer(&options, &container);
     if (FAILED(result))

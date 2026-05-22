@@ -30,6 +30,7 @@ Abstract:
 #include <arpa/inet.h>
 
 #include <pty.h>
+#include <mutex>
 #include "mountutilcpp.h"
 #include <filesystem>
 
@@ -621,6 +622,10 @@ void HandleMessageImpl(
 
             // Recreate the crash dump symlink inside the new root.
             CreateCaptureCrashSymlink();
+
+            // Start the memory reduction thread now that procfs is in its final location.
+            static std::once_flag memoryReductionFlag;
+            std::call_once(memoryReductionFlag, [] { StartMemoryReductionThread(LxMiniInitMemoryReclaimModeDropCache); });
         }
 
         response.Result = 0;
@@ -670,13 +675,13 @@ void HandleMessageImpl(
     Transaction.SendResultMessage(result < 0 ? errno : 0);
 }
 
-void HandleMessageImpl(
-    wsl::shared::SocketChannel& Channel, wsl::shared::Transaction& Transaction, const WSLC_UNMOUNT& Message, const gsl::span<gsl::byte>& Buffer)
+void HandleMessageImpl(wsl::shared::SocketChannel& Channel, wsl::shared::Transaction& Transaction, const WSLC_UNMOUNT&, const gsl::span<gsl::byte>& Buffer)
 {
-    auto result = umount(Message.Buffer) < 0 ? errno : 0;
+    auto* path = wsl::shared::string::FromMessageBuffer<WSLC_UNMOUNT>(Buffer);
+    auto result = umount(path) < 0 ? errno : 0;
     if (result == 0)
     {
-        result = rmdir(Message.Buffer) < 0 ? errno : 0;
+        result = rmdir(path) < 0 ? errno : 0;
     }
 
     Transaction.SendResultMessage<int32_t>(result);

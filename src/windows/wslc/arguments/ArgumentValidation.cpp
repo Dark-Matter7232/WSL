@@ -40,8 +40,29 @@ void Argument::Validate(const ArgMap& execArgs) const
         validation::ValidateWSLCSignalFromString(execArgs.GetAll<ArgType::Signal>(), m_name);
         break;
 
+    case ArgType::StopSignal:
+        validation::ValidateWSLCSignalFromString(execArgs.GetAll<ArgType::StopSignal>(), m_name);
+        break;
+
+    case ArgType::ShmSize:
+        validation::ValidateMemorySize(execArgs.GetAll<ArgType::ShmSize>(), m_name);
+        break;
+
+    case ArgType::Tail:
+        validation::ValidateIntegerFromString<ULONGLONG>(
+            execArgs.GetAll<ArgType::Tail>(), m_name, [](auto value) { return value != 0; });
+        break;
+
     case ArgType::Time:
         validation::ValidateIntegerFromString<LONGLONG>(execArgs.GetAll<ArgType::Time>(), m_name);
+        break;
+
+    case ArgType::Last:
+        validation::ValidateIntegerFromString<int>(execArgs.GetAll<ArgType::Last>(), m_name);
+        break;
+
+    case ArgType::Filter:
+        validation::ValidateFilter(execArgs.GetAll<ArgType::Filter>());
         break;
 
     case ArgType::Gpus:
@@ -99,6 +120,19 @@ void ValidateVolumeMount(const std::vector<std::wstring>& values)
     for (const auto& value : values)
     {
         std::ignore = models::VolumeMount::Parse(value);
+    }
+}
+
+// Validates that each --filter argument is in the form "key=value". Rejects entries without an '=';
+// the runtime validates the key and value for specific objects.
+void ValidateFilter(const std::vector<std::wstring>& values)
+{
+    for (const auto& value : values)
+    {
+        if (value.find(L'=') == std::wstring::npos)
+        {
+            throw ArgumentException(Localization::WSLCCLI_InvalidFilterError(value));
+        }
     }
 }
 
@@ -204,6 +238,25 @@ void ValidateGpus(const std::vector<std::wstring>& values, const std::wstring& a
             throw ArgumentException(Localization::WSLCCLI_GpusInvalidValue(argName, value));
         }
     }
+}
+
+void ValidateMemorySize(const std::vector<std::wstring>& values, const std::wstring& argName)
+{
+    for (const auto& value : values)
+    {
+        std::ignore = GetMemorySizeFromString(value, argName);
+    }
+}
+
+int64_t GetMemorySizeFromString(const std::wstring& input, const std::wstring& argName)
+{
+    auto parsed = wsl::shared::string::ParseMemorySize(input.c_str());
+    if (!parsed.has_value())
+    {
+        throw ArgumentException(Localization::WSLCCLI_InvalidMemorySizeError(argName, input));
+    }
+
+    return static_cast<int64_t>(parsed.value());
 }
 
 } // namespace wsl::windows::wslc::validation
