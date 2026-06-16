@@ -2,6 +2,9 @@
 
 #pragma once
 
+#include <concurrent_queue.h>
+#include <list>
+
 #define LX_RELAY_BUFFER_SIZE 0x1000
 
 namespace wsl::windows::common::io {
@@ -10,7 +13,10 @@ enum class IOHandleStatus
 {
     Standby,
     Pending,
-    Completed
+    Completed,
+    // A persistent handle with no work to do. It stays registered with the MultiHandleWait loop but is not
+    // waited on; it returns to Standby once more data is pushed into it.
+    Idle
 };
 
 struct HandleWrapper
@@ -104,13 +110,33 @@ public:
     void Collect() override;
     HANDLE GetHandle() const override;
 
-private:
+protected:
     HandleWrapper Handle;
+    OVERLAPPED Overlapped{};
+
+private:
     std::function<void(const gsl::span<char>& Buffer)> OnRead;
     wil::unique_event Event{wil::EventOptions::ManualReset};
-    OVERLAPPED Overlapped{};
     BufferWrapper Buffer{LX_RELAY_BUFFER_SIZE};
     LARGE_INTEGER Offset{};
+};
+
+// A ReadHandle for a server named pipe. It waits for a client to connect (ConnectNamedPipe) before
+// reading, so it can be scheduled directly with a freshly created server pipe. The connect reuses the
+// base read handle's overlapped and event, so the base destructor cancels a pending connect correctly.
+class ReadNamedPipe : public ReadHandle
+{
+public:
+    NON_COPYABLE(ReadNamedPipe);
+    NON_MOVABLE(ReadNamedPipe);
+
+    ReadNamedPipe(HandleWrapper&& Pipe, std::function<void(const gsl::span<char>& Buffer)>&& OnRead);
+
+    void Schedule() override;
+    void Collect() override;
+
+private:
+    bool m_connected = false;
 };
 
 class SingleAcceptHandle : public OverlappedIOHandle
@@ -176,7 +202,11 @@ public:
     NON_COPYABLE(ReadSocketMessageHandle);
     NON_MOVABLE(ReadSocketMessageHandle);
 
-    ReadSocketMessageHandle(HandleWrapper&& Socket, std::vector<gsl::byte>& Buffer, std::function<void(const gsl::span<gsl::byte>& Message)>&& OnMessage);
+    ReadSocketMessageHandle(
+        HandleWrapper&& Socket,
+        std::vector<gsl::byte>& Buffer,
+        std::vector<gsl::byte>& PendingBytes,
+        std::function<void(const gsl::span<gsl::byte>& Message)>&& OnMessage);
     ~ReadSocketMessageHandle();
 
     void Schedule() override;
@@ -186,9 +216,11 @@ public:
 private:
     void ScheduleRecv();
     void ProcessRecvResult(DWORD BytesRead);
+    bool ProcessChunk();
 
     HandleWrapper Socket;
     std::vector<gsl::byte>& Buffer;
+    std::vector<gsl::byte>& PendingBytes;
     std::function<void(const gsl::span<gsl::byte>& Message)> OnMessage;
     wil::unique_event Event{wil::EventOptions::ManualReset};
     OVERLAPPED Overlapped{};
@@ -203,20 +235,64 @@ public:
     NON_COPYABLE(WriteHandle);
     NON_MOVABLE(WriteHandle);
 
-    WriteHandle(HandleWrapper&& Handle, const std::vector<char>& Buffer = {});
-    WriteHandle(HandleWrapper&& Handle, gsl::span<gsl::byte> Span);
+    WriteHandle(HandleWrapper&& Handle, const std::vector<char>& Source = {}, bool CompleteOnDrained = true);
+    WriteHandle(HandleWrapper&& Handle, gsl::span<gsl::byte> Source);
     ~WriteHandle();
     void Schedule() override;
     void Collect() override;
     HANDLE GetHandle() const override;
     void Push(const gsl::span<char>& Buffer);
 
+    // Controls whether the writer completes (and is removed from the loop) or becomes Idle once its buffer drains.
+    void SetCompleteOnDrained(bool CompleteOnDrained);
+
+    // Returns the number of bytes that have been queued for writing but not yet written to the handle.
+    size_t PendingBytes() const;
+
 private:
+    // Returns the state to adopt once the active buffer drains: Completed for one-shot writers, or Idle/Standby
+    // for reusable writers depending on whether more data is queued.
+    IOHandleStatus DrainedState() const;
+
     HandleWrapper Handle;
     wil::unique_event Event{wil::EventOptions::ManualReset};
     OVERLAPPED Overlapped{};
     BufferWrapper Buffer;
     LARGE_INTEGER Offset{};
+    bool CompleteOnDrained = true;
+    std::vector<char> Pending;
+};
+
+// A persistent writer for a named pipe that transparently handles the server-side connection lifecycle. Data
+// pushed via Push() is written to the pipe by the IO loop. 'Connected' indicates the pipe already has a connected
+// peer.
+class WriteNamedPipe : public OverlappedIOHandle
+{
+public:
+    NON_COPYABLE(WriteNamedPipe);
+    NON_MOVABLE(WriteNamedPipe);
+
+    WriteNamedPipe(HandleWrapper&& Pipe, bool Reconnect, bool Connected);
+    ~WriteNamedPipe();
+    void Schedule() override;
+    void Collect() override;
+    HANDLE GetHandle() const override;
+    void Push(const gsl::span<char>& Buffer);
+
+    // Returns the number of bytes that have been queued for writing but not yet written to the pipe.
+    size_t PendingBytes() const;
+
+private:
+    // Drops the current client and arms a fresh connection so the next Schedule() reconnects before writing.
+    void Reconnect();
+
+    HandleWrapper Pipe;
+    std::optional<WriteHandle> Write;
+    wil::unique_event ConnectEvent{wil::EventOptions::ManualReset};
+    OVERLAPPED ConnectOverlapped{};
+    bool ReconnectOnFailure = false;
+    bool NeedConnect = false;
+    bool Connecting = false;
 };
 
 template <typename TRead = ReadHandle>
@@ -227,7 +303,7 @@ public:
     NON_MOVABLE(RelayHandle);
 
     RelayHandle(HandleWrapper&& Input, HandleWrapper&& Output) :
-        Read(std::move(Input), [this](const gsl::span<char>& Buffer) { return OnRead(Buffer); }), Write(std::move(Output))
+        Read(std::move(Input), [this](const gsl::span<char>& Buffer) { return OnRead(Buffer); }), Write(std::move(Output), {}, false)
     {
     }
 
@@ -238,10 +314,21 @@ public:
         // If the Buffer is empty, then we're reading.
         if (PendingBuffer.empty())
         {
-            // If the output buffer is empty and the reading end is completed, then we're done.
             if (Read.GetState() == IOHandleStatus::Completed)
             {
-                State = IOHandleStatus::Completed;
+                // If all reading is complete, flush any pending writes before transitioning to Completed.
+                Write.SetCompleteOnDrained(true);
+
+                if (Write.PendingBytes() > 0)
+                {
+                    Write.Schedule();
+                    State = Write.GetState();
+                }
+                else
+                {
+                    State = IOHandleStatus::Completed;
+                }
+
                 return;
             }
 
@@ -349,12 +436,10 @@ private:
     WriteHandle* ActiveHandle = nullptr;
     size_t RemainingBytes = 0;
 };
-
 class MultiHandleWait
 {
 public:
     NON_COPYABLE(MultiHandleWait);
-    DEFAULT_MOVABLE(MultiHandleWait);
 
     enum Flags
     {
@@ -365,13 +450,29 @@ public:
     };
 
     MultiHandleWait() = default;
+    MultiHandleWait(MultiHandleWait&&) noexcept;
+    MultiHandleWait& operator=(MultiHandleWait&&) noexcept;
 
     void AddHandle(std::unique_ptr<OverlappedIOHandle>&& handle, Flags flags = Flags::None);
     bool Run(std::optional<std::chrono::milliseconds> Timeout);
     void Cancel();
 
 private:
-    std::vector<std::pair<Flags, std::unique_ptr<OverlappedIOHandle>>> m_handles;
+    struct Entry
+    {
+        Flags HandleFlags{};
+        std::unique_ptr<OverlappedIOHandle> Handle;
+        MultiHandleWait* self;
+    };
+
+    static void NTAPI WaitCallback(PVOID Context, BOOLEAN TimerOrWaitFired);
+
+    concurrency::concurrent_queue<Entry*> m_signaledHandles;
+    wil::unique_event m_handleSignaledEvent{wil::EventOptions::ManualReset};
+
+    // N.B. A std::list is used (rather than a vector) so handles can be added from a callback while Run() is
+    // iterating m_handles without invalidating the loop's iterator.
+    std::list<std::unique_ptr<Entry>> m_handles;
     bool m_cancel = false;
 };
 

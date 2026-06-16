@@ -156,6 +156,13 @@ COMMAND_LINE_TEST_CASE(L"container stats cont1", L"stats", true)
 COMMAND_LINE_TEST_CASE(L"container stats cont1 cont2", L"stats", true)
 COMMAND_LINE_TEST_CASE(L"container stats --no-trunc cont1", L"stats", true)
 COMMAND_LINE_TEST_CASE(L"container stats --all", L"stats", true)
+// Export command tests
+COMMAND_LINE_TEST_CASE(L"export cont1", L"export", true)
+COMMAND_LINE_TEST_CASE(L"container export cont1", L"export", true)
+COMMAND_LINE_TEST_CASE(L"container export --output foo cont1", L"export", true)
+COMMAND_LINE_TEST_CASE(L"container export -o foo cont1", L"export", true)
+COMMAND_LINE_TEST_CASE(L"container export cont1 --output foo", L"export", true)
+COMMAND_LINE_TEST_CASE(L"container export cont1 -o foo", L"export", true)
 
 // Logs command
 COMMAND_LINE_TEST_CASE(L"logs cont1", L"logs", true)
@@ -175,6 +182,14 @@ COMMAND_LINE_TEST_CASE(L"container logs -n abc cont1", L"logs", false)
 COMMAND_LINE_TEST_CASE(L"container logs -n=abc cont1", L"logs", false)
 COMMAND_LINE_TEST_CASE(L"container logs --tail", L"logs", false)
 COMMAND_LINE_TEST_CASE(L"container logs -n", L"logs", false)
+COMMAND_LINE_TEST_CASE(L"container logs --timestamps cont1", L"logs", true)
+COMMAND_LINE_TEST_CASE(L"container logs -t cont1", L"logs", true)
+COMMAND_LINE_TEST_CASE(L"container logs --since 1700000000 cont1", L"logs", true)
+COMMAND_LINE_TEST_CASE(L"container logs --until 1700000000 cont1", L"logs", true)
+COMMAND_LINE_TEST_CASE(L"container logs --since 1700000000 --until 1700001000 cont1", L"logs", true)
+COMMAND_LINE_TEST_CASE(L"container logs --since abc cont1", L"logs", false)
+COMMAND_LINE_TEST_CASE(L"container logs --until abc cont1", L"logs", false)
+COMMAND_LINE_TEST_CASE(L"container logs --follow --timestamps --since 100 --tail 5 cont1", L"logs", true)
 
 // Image command
 COMMAND_LINE_TEST_CASE(L"image build C:\\context", L"build", true)
@@ -206,6 +221,8 @@ COMMAND_LINE_TEST_CASE(L"image list --verbose", L"list", true)
 COMMAND_LINE_TEST_CASE(L"image list -q", L"list", true)
 COMMAND_LINE_TEST_CASE(L"image pull ubuntu", L"pull", true)
 COMMAND_LINE_TEST_CASE(L"pull ubuntu", L"pull", true)
+COMMAND_LINE_TEST_CASE(L"image rm cont1 --force --no-prune", L"remove", true)
+COMMAND_LINE_TEST_CASE(L"image rm cont1 cont2 cont3 --force --no-prune", L"remove", true)
 
 // Version command tests
 COMMAND_LINE_TEST_CASE(L"version", L"version", true)
