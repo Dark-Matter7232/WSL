@@ -134,12 +134,12 @@ class WSLCE2EImageDeleteTests
 
         VerifyImageIsListed(DebianImage);
 
-        auto listAfter = RunWslc(L"image list -q");
+        auto listAfter = RunWslc(L"image list");
         listAfter.Verify({.Stderr = L"", .ExitCode = 0});
         for (const auto& line : listAfter.GetStdoutLines())
         {
-            VERIFY_IS_TRUE(
-                line.find(NoPruneTaggedImage.NameAndTag()) == std::wstring::npos,
+            VERIFY_IS_FALSE(
+                line.find(NoPruneTaggedImage.Name) != std::wstring::npos && line.find(NoPruneTaggedImage.Tag) != std::wstring::npos,
                 L"Secondary tag should have been removed by `image delete --no-prune`");
         }
     }
@@ -193,7 +193,6 @@ private:
         options << L"The following options are available:\r\n"                    //
                 << L"  -f,--force  Delete images even if they are being used\r\n" //
                 << L"  --no-prune  Do not delete untagged parents\r\n"            //
-                << L"  --session   Specify the session to use\r\n"                //
                 << L"  -?,--help   Shows help about the selected command\r\n"     //
                 << L"\r\n";
         return options.str();

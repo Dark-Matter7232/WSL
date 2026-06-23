@@ -440,7 +440,7 @@ class WSLCE2EContainerCreateTests
 
         // Start the container.
         result = RunWslc(std::format(L"container start {}", WslcContainerName));
-        result.Verify({.Stderr = L"", .ExitCode = 0});
+        result.Verify({.Stdout = std::format(L"{}\r\n", WslcContainerName), .Stderr = L"", .ExitCode = 0});
 
         // Verify with retry timeout of 1 minute.
         VerifyContainerIsNotListed(WslcContainerName, std::chrono::seconds(2), std::chrono::minutes(1));
@@ -458,7 +458,7 @@ class WSLCE2EContainerCreateTests
 
         // Start again - should succeed without error
         result = RunWslc(std::format(L"container start {}", WslcContainerName));
-        result.Verify({.Stderr = L"", .ExitCode = 0});
+        result.Verify({.Stdout = std::format(L"{}\r\n", WslcContainerName), .Stderr = L"", .ExitCode = 0});
 
         // Verify the container is still running
         VerifyContainerIsListed(containerId, L"running");
@@ -1085,20 +1085,55 @@ class WSLCE2EContainerCreateTests
     }
 
     // https://github.com/microsoft/WSL/issues/14433
-    WSLC_TEST_METHOD(WSLCE2E_Container_Create_PortUdp_NotSupported)
+    WSLC_TEST_METHOD(WSLCE2E_Container_Create_Publish_UDP)
     {
-        auto result = RunWslc(std::format(L"container create --name {} -p 80:80/udp {}", WslcContainerName, DebianImage.NameAndTag()));
-        result.Verify({.Stderr = L"Port mappings with specific host IPs or UDP protocol are not currently supported\r\nError code: ERROR_NOT_SUPPORTED\r\n", .ExitCode = 1});
-        EnsureContainerDoesNotExist(WslcContainerName);
+        // Port bindings only show up in inspect after start, so create then start before inspecting.
+        auto result = RunWslc(std::format(
+            L"container create --name {} -p {}:{}/udp {} sleep 5",
+            WslcContainerName,
+            HostTestPort1,
+            ContainerTestPort,
+            DebianImage.NameAndTag()));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        result = RunWslc(std::format(L"container start {}", WslcContainerName));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        // Verify the UDP port mapping is correct in the container inspect data.
+        const auto inspect = InspectContainer(WslcContainerName);
+        const auto portKey = std::to_string(ContainerTestPort) + "/udp";
+        VERIFY_IS_TRUE(inspect.Ports.contains(portKey));
+
+        const auto& bindings = inspect.Ports.at(portKey);
+        VERIFY_ARE_EQUAL(1u, bindings.size());
+        VERIFY_ARE_EQUAL(std::to_string(HostTestPort1), bindings[0].HostPort);
+        VERIFY_ARE_EQUAL("127.0.0.1", bindings[0].HostIp);
     }
 
     // https://github.com/microsoft/WSL/issues/14433
-    WSLC_TEST_METHOD(WSLCE2E_Container_Create_PortHostIP_NotSupported)
+    WSLC_TEST_METHOD(WSLCE2E_Container_Create_Publish_HostIP)
     {
-        auto result =
-            RunWslc(std::format(L"container create --name {} -p 127.0.0.1:80:80 {}", WslcContainerName, DebianImage.NameAndTag()));
-        result.Verify({.Stderr = L"Port mappings with specific host IPs or UDP protocol are not currently supported\r\nError code: ERROR_NOT_SUPPORTED\r\n", .ExitCode = 1});
-        EnsureContainerDoesNotExist(WslcContainerName);
+        // Port bindings only show up in inspect after start, so create then start before inspecting.
+        auto result = RunWslc(std::format(
+            L"container create --name {} -p 127.0.0.1:{}:{} {} sleep 5",
+            WslcContainerName,
+            HostTestPort1,
+            ContainerTestPort,
+            DebianImage.NameAndTag()));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        result = RunWslc(std::format(L"container start {}", WslcContainerName));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        // Verify the port mapping is bound to the requested host IP in the container inspect data.
+        const auto inspect = InspectContainer(WslcContainerName);
+        const auto portKey = std::to_string(ContainerTestPort) + "/tcp";
+        VERIFY_IS_TRUE(inspect.Ports.contains(portKey));
+
+        const auto& bindings = inspect.Ports.at(portKey);
+        VERIFY_ARE_EQUAL(1u, bindings.size());
+        VERIFY_ARE_EQUAL(std::to_string(HostTestPort1), bindings[0].HostPort);
+        VERIFY_ARE_EQUAL("127.0.0.1", bindings[0].HostIp);
     }
 
 private:
@@ -1188,7 +1223,6 @@ private:
                 << L"  -p,--publish      Publish a port from a container to host\r\n"
                 << L"  -P,--publish-all  Publish all exposed ports to random host ports\r\n"
                 << L"  --rm              Remove the container after it stops\r\n"
-                << L"  --session         Specify the session to use\r\n"
                 << L"  --shm-size        Size of /dev/shm (e.g. 64M, 1G)\r\n"
                 << L"  --stop-signal     Signal to stop the container\r\n"
                 << L"  --tmpfs           Mount tmpfs to the container at the given path\r\n"
