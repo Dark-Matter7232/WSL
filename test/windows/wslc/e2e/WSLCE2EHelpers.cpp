@@ -288,6 +288,34 @@ wslc_schema::InspectContainer InspectContainer(const std::wstring& containerName
     return inspectData[0];
 }
 
+wslc_schema::Health WaitForContainerHealth(const std::wstring& containerName, const std::string_view& expectedStatus, std::chrono::milliseconds timeout)
+{
+    try
+    {
+        return wsl::shared::retry::RetryWithTimeout<wslc_schema::Health>(
+            [&]() {
+                const auto inspect = InspectContainer(containerName);
+                THROW_HR_IF(E_FAIL, !inspect.State.Health.has_value());
+                THROW_HR_IF(E_FAIL, inspect.State.Health->Status != expectedStatus);
+                return inspect.State.Health.value();
+            },
+            std::chrono::seconds(1),
+            timeout);
+    }
+    catch (...)
+    {
+        const auto inspect = InspectContainer(containerName);
+        const std::string actual = inspect.State.Health.has_value() ? inspect.State.Health->Status : "<none>";
+        VERIFY_FAIL(std::format(
+                        L"Container '{}' did not reach health status '{}' (last status: '{}')",
+                        containerName,
+                        wsl::shared::string::MultiByteToWide(std::string(expectedStatus)),
+                        wsl::shared::string::MultiByteToWide(actual))
+                        .c_str());
+        throw;
+    }
+}
+
 wslc_schema::InspectImage InspectImage(const std::wstring& imageName)
 {
     auto result = RunWslc(std::format(L"image inspect {}", imageName));
@@ -314,17 +342,6 @@ void EnsureContainerDoesNotExist(const std::wstring& containerName)
     if (it == containers.end())
     {
         return;
-    }
-
-    if (it->State == WSLCContainerState::WslcContainerStateRunning)
-    {
-        auto result = RunWslc(std::format(L"container kill {}", containerName));
-        // Tolerate WSLC_E_CONTAINER_NOT_FOUND - container already stopped/removed
-        if (result.ExitCode != 0 &&
-            (!result.Stderr.has_value() || result.Stderr.value().find(L"WSLC_E_CONTAINER_NOT_FOUND") == std::wstring::npos))
-        {
-            result.Verify({.Stdout = L"", .Stderr = L"", .ExitCode = 0});
-        }
     }
 
     auto result = RunWslc(std::format(L"container remove --force {}", containerName));

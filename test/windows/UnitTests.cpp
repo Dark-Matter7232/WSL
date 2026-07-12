@@ -516,6 +516,46 @@ class UnitTests
         }
     }
 
+    WSL2_TEST_METHOD(ConfigUpdateLanguage)
+    {
+        // Validates that init populates $LANG from the distro locale configuration file.
+        // ConfigUpdateLanguage reads /etc/default/locale first, then /etc/locale.conf, and uses
+        // the first file that exists. See ConfigUpdateLanguage in src/linux/init/config.cpp.
+
+        DistroFileChange defaultLocale(L"/etc/default/locale", LxsstuLaunchWsl(L"test -f /etc/default/locale") == 0);
+        DistroFileChange localeConf(L"/etc/locale.conf", LxsstuLaunchWsl(L"test -f /etc/locale.conf") == 0);
+
+        const auto readLang = []() { return LxsstuLaunchWslAndCaptureOutput(L"echo $LANG").first; };
+
+        // Only /etc/default/locale is present (Debian/Ubuntu).
+        {
+            defaultLocale.Delete();
+            localeConf.Delete();
+            defaultLocale.SetContent(L"LANG=de_DE.UTF-8\n");
+            TerminateDistribution();
+            VERIFY_ARE_EQUAL(readLang(), L"de_DE.UTF-8\n");
+        }
+
+        // Only /etc/locale.conf is present (Fedora, Arch, openSUSE, ...).
+        {
+            defaultLocale.Delete();
+            localeConf.Delete();
+            localeConf.SetContent(L"LANG=fr_FR.UTF-8\n");
+            TerminateDistribution();
+            VERIFY_ARE_EQUAL(readLang(), L"fr_FR.UTF-8\n");
+        }
+
+        // Both files are present: /etc/default/locale takes precedence because it is read first.
+        {
+            defaultLocale.Delete();
+            localeConf.Delete();
+            defaultLocale.SetContent(L"LANG=ja_JP.UTF-8\n");
+            localeConf.SetContent(L"LANG=en_US.UTF-8\n");
+            TerminateDistribution();
+            VERIFY_ARE_EQUAL(readLang(), L"ja_JP.UTF-8\n");
+        }
+    }
+
     TEST_METHOD(Dup)
     {
         VERIFY_NO_THROW(LxsstuRunTest(L"/data/test/wsl_unit_tests dup", L"Dup"));
@@ -7446,6 +7486,71 @@ Error code: Wsl/InstallDistro/WSL_E_INVALID_JSON\r\n",
             const auto hr = wil::ResultFromException([&]() { channel.ReceiveMessage<RESULT_MESSAGE<int32_t>>(nullptr, 100); });
             VERIFY_ARE_EQUAL(hr, HRESULT_FROM_WIN32(ERROR_TIMEOUT));
         }
+    }
+
+    TEST_METHOD(DownloadToHiddenSystemTempFolder)
+    {
+        // Avoid contaminating the real temp folder.
+        const auto testTempFolder = std::filesystem::temp_directory_path() / L"wsl-download-test";
+        std::filesystem::create_directories(testTempFolder);
+        auto cleanupTempFolder = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&] {
+            std::error_code error;
+            std::filesystem::remove_all(testTempFolder, error);
+        });
+
+        const auto originalAttributes = GetFileAttributesW(testTempFolder.c_str());
+        VERIFY_IS_TRUE(originalAttributes != INVALID_FILE_ATTRIBUTES);
+        VERIFY_IS_TRUE(SetFileAttributesW(testTempFolder.c_str(), originalAttributes | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM));
+
+        ScopedEnvVariable temp(L"TEMP", testTempFolder.wstring());
+        ScopedEnvVariable tmp(L"TMP", testTempFolder.wstring());
+
+        VERIFY_IS_TRUE(std::filesystem::equivalent(std::filesystem::temp_directory_path(), testTempFolder));
+
+        constexpr USHORT port = 6666;
+        const auto endpoint = std::format(L"http://127.0.0.1:{}/", port);
+        constexpr auto fileName = L"downloaded-file.bin";
+        constexpr auto fileContent = L"wsl download test content";
+        UniqueWebServer server(endpoint.c_str(), fileContent);
+
+        const auto url = endpoint + fileName;
+        const auto noProgress = [](uint64_t, uint64_t) {};
+
+        wsl::shared::retry::RetryWithTimeout<void>(
+            [&]() {
+                wil::unique_socket probe{socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
+                THROW_LAST_ERROR_IF(!probe);
+
+                sockaddr_in address{};
+                address.sin_family = AF_INET;
+                address.sin_port = htons(port);
+                address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+                THROW_LAST_ERROR_IF(connect(probe.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR);
+            },
+            std::chrono::milliseconds(500),
+            std::chrono::seconds(5));
+
+        const auto firstPath = wsl::windows::common::wslutil::DownloadFileImpl(url, L"", noProgress);
+
+        auto readFile = [](const std::filesystem::path& Path) {
+            std::ifstream file(Path, std::ios::binary);
+            VERIFY_IS_TRUE(file.good());
+            return std::string{std::istreambuf_iterator<char>(file), {}};
+        };
+
+        VERIFY_ARE_EQUAL(std::filesystem::path(firstPath).parent_path(), testTempFolder);
+        VERIFY_ARE_EQUAL(std::filesystem::path(firstPath).filename().wstring(), std::wstring(fileName));
+        VERIFY_IS_TRUE(std::filesystem::exists(firstPath));
+        VERIFY_ARE_EQUAL(readFile(firstPath), wsl::shared::string::WideToMultiByte(fileContent));
+
+        const auto secondPath = wsl::windows::common::wslutil::DownloadFileImpl(url, L"", noProgress);
+
+        VERIFY_ARE_EQUAL(std::filesystem::path(secondPath).parent_path(), testTempFolder);
+        VERIFY_ARE_EQUAL(std::filesystem::path(secondPath).filename().wstring(), std::wstring(L"downloaded-file (2).bin"));
+        VERIFY_IS_TRUE(std::filesystem::exists(firstPath));
+        VERIFY_IS_TRUE(std::filesystem::exists(secondPath));
+        VERIFY_ARE_EQUAL(readFile(secondPath), wsl::shared::string::WideToMultiByte(fileContent));
     }
 
 }; // namespace UnitTests

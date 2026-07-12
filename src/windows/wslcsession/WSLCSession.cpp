@@ -21,6 +21,7 @@ Abstract:
 #include "ServiceProcessLauncher.h"
 #include "WindowsCertStore.h"
 #include "WslCoreFilesystem.h"
+#include "WSLCSessionDefaults.h"
 #include "wslpolicies.h"
 #include "APICompat.h"
 
@@ -38,7 +39,7 @@ using wsl::windows::service::wslc::WSLCVirtualMachine;
 constexpr auto c_containerdStorage = "/var/lib/docker";
 constexpr auto c_containerdSocket = "/run/containerd/containerd.sock";
 constexpr auto c_dockerdReadyLogLine = "API listen on /var/run/docker.sock";
-constexpr auto c_storageVhdFilename = L"storage.vhdx";
+constexpr auto c_storageVhdFilename = wsl::windows::wslc::DefaultStorageVhdName;
 constexpr DWORD c_processTerminateTimeoutMs = 30 * 1000;
 constexpr DWORD c_processKillTimeoutMs = 10 * 1000;
 
@@ -63,14 +64,14 @@ void EnforceRegistryAllowlist(const std::string& Repo)
     THROW_HR_WITH_USER_ERROR(WSLC_E_REGISTRY_BLOCKED_BY_POLICY, Localization::MessageRegistryBlockedByPolicy(serverWide));
 }
 
-std::string IndentLines(const std::string& input, const std::string& prefix)
+std::string IndentLines(const std::string& input, const std::string& prefix, bool prefixFirstLine = true)
 {
     if (input.empty())
     {
         return {};
     }
 
-    std::string result = prefix;
+    std::string result = prefixFirstLine ? prefix : "";
     for (size_t i = 0; i < input.size(); i++)
     {
         result.push_back(input[i]);
@@ -504,6 +505,11 @@ void WSLCSession::ConfigureStorage(const WSLCSessionInitSettings& Settings, PSID
         // If the VHD wasn't found, create it.
         WSL_LOG("CreateStorageVhd", TraceLoggingValue(m_storageVhdPath.c_str(), "StorageVhdPath"));
 
+        if (WI_IsFlagSet(Settings.StorageFlags, WSLCSessionStorageFlagsWarnCustomLocation))
+        {
+            EMIT_USER_WARNING(Localization::MessageWslcSessionStorageCustomLocation(storagePath.c_str()));
+        }
+
         std::filesystem::create_directories(storagePath);
         wsl::core::filesystem::CreateVhd(m_storageVhdPath.c_str(), Settings.MaximumStorageSizeMb * _1MB, UserSid, false, false);
         vhdCreated = true;
@@ -873,6 +879,7 @@ try
     RETURN_HR_IF(E_INVALIDARG, *Options->ContextPath == L'\0');
     RETURN_HR_IF(E_INVALIDARG, Options->Tags.Count > 0 && Options->Tags.Values == nullptr);
     RETURN_HR_IF(E_INVALIDARG, Options->BuildArgs.Count > 0 && Options->BuildArgs.Values == nullptr);
+    RETURN_HR_IF(E_INVALIDARG, Options->Labels.Count > 0 && Options->Labels.Values == nullptr);
     THROW_HR_IF_MSG(
         E_INVALIDARG,
         WI_IsAnyFlagSet(static_cast<WSLCBuildImageFlags>(Options->Flags), ~WSLCBuildImageFlagsValid),
@@ -935,6 +942,13 @@ try
         buildArgs.push_back("--build-arg");
         buildArgs.push_back(Options->BuildArgs.Values[i]);
     }
+    for (ULONG i = 0; i < Options->Labels.Count; i++)
+    {
+        RETURN_HR_IF_NULL(E_INVALIDARG, Options->Labels.Values[i]);
+        RETURN_HR_IF(E_INVALIDARG, Options->Labels.Values[i][0] == '-');
+        buildArgs.push_back("--label");
+        buildArgs.push_back(Options->Labels.Values[i]);
+    }
 
     buildArgs.push_back("-f");
     buildArgs.push_back("-");
@@ -947,8 +961,18 @@ try
 
     auto io = CreateIOContext();
 
-    io.AddHandle(std::make_unique<io::RelayHandle<io::ReadHandle>>(
-        buildFileHandle.Get(), common::io::HandleWrapper{buildProcess.GetStdHandle(WSLCFDStdin)}));
+    io.AddHandle(
+        std::make_unique<io::RelayHandle<io::ReadHandle>>(buildFileHandle.Get(), common::io::HandleWrapper{buildProcess.GetStdHandle(WSLCFDStdin)}),
+        MultiHandleWait::NeedNotComplete,
+        [&buildProcess]() {
+            // If we receive an error relaying stdin, it could be because the process exited.
+            // Wait up to one second for the process to exit so errors in this relay don't override the actual build result.
+            if (!buildProcess.GetExitEvent().wait(1000))
+            {
+                // Otherwise, throw the error and cancel the build.
+                throw;
+            }
+        });
 
     bool verbose = WI_IsFlagSet(Options->Flags, WSLCBuildImageFlagsVerbose);
     std::string allOutput;
@@ -1067,6 +1091,10 @@ try
                 std::string decoded = wslutil::Base64Decode(log.data);
                 if (!decoded.empty())
                 {
+                    // The first character of this chunk begins a new line (and so needs a stage prefix) unless it
+                    // continues an unterminated line from the same vertex.
+                    bool continuingLine = needsNewline && log.vertex == lastLogVertex;
+
                     if (log.vertex != lastLogVertex && decoded[0] != '\n')
                     {
                         flushLine();
@@ -1078,11 +1106,13 @@ try
                     {
                         reportProgress(decoded.substr(0, 1), c_logId);
                         decoded.erase(0, 1);
+
+                        continuingLine = false;
                     }
 
                     if (!decoded.empty())
                     {
-                        reportProgress(IndentLines(decoded, logPrefix(it->second)), c_logId);
+                        reportProgress(IndentLines(decoded, logPrefix(it->second), !continuingLine), c_logId);
                     }
 
                     needsNewline = !decoded.empty() && decoded.back() != '\n';
@@ -1197,11 +1227,9 @@ try
 }
 CATCH_RETURN();
 
-HRESULT WSLCSession::LoadImage(const WSLCHandle ImageHandle, IProgressCallback* ProgressCallback, ULONGLONG ContentSize, IWarningCallback* WarningCallback)
+HRESULT WSLCSession::LoadImage(const WSLCHandle ImageHandle, ULONGLONG ContentSize, IWarningCallback* WarningCallback, IImageLoadCallback* LoadCallback)
 try
 {
-    UNREFERENCED_PARAMETER(ProgressCallback);
-
     WSLCExecutionContext context(this, WarningCallback);
 
     auto lock = m_lock.lock_shared();
@@ -1210,18 +1238,15 @@ try
 
     auto requestContext = m_dockerClient->LoadImage(ContentSize);
 
-    std::ignore = ImportImageImpl(*requestContext, ImageHandle);
+    std::ignore = ImportImageImpl(*requestContext, ImageHandle, LoadCallback);
 
     return S_OK;
 }
 CATCH_RETURN();
 
-HRESULT WSLCSession::ImportImage(
-    const WSLCHandle ImageHandle, LPCSTR ImageName, IProgressCallback* ProgressCallback, ULONGLONG ContentSize, IWarningCallback* WarningCallback, LPSTR* ImageId)
+HRESULT WSLCSession::ImportImage(const WSLCHandle ImageHandle, LPCSTR ImageName, ULONGLONG ContentSize, IWarningCallback* WarningCallback, LPSTR* ImageId)
 try
 {
-    UNREFERENCED_PARAMETER(ProgressCallback);
-
     WSLCExecutionContext context(this, WarningCallback);
 
     RETURN_HR_IF_NULL(E_POINTER, ImageId);
@@ -1264,9 +1289,15 @@ try
 }
 CATCH_RETURN();
 
-std::optional<std::string> WSLCSession::ImportImageImpl(DockerHTTPClient::HTTPRequestContext& Request, const WSLCHandle ImageHandle)
+std::optional<std::string> WSLCSession::ImportImageImpl(DockerHTTPClient::HTTPRequestContext& Request, const WSLCHandle ImageHandle, IImageLoadCallback* LoadCallback)
 {
     auto userHandle = OpenUserHandle(ImageHandle);
+
+    std::optional<UserCOMCallback> comCall;
+    if (LoadCallback != nullptr)
+    {
+        comCall = RegisterUserCOMCallback();
+    }
 
     THROW_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_STATE), !m_dockerClient.has_value());
 
@@ -1319,6 +1350,37 @@ std::optional<std::string> WSLCSession::ImportImageImpl(DockerHTTPClient::HTTPRe
         else if (parsed.stream.has_value())
         {
             WSL_LOG("ImageImportProgress", TraceLoggingValue(parsed.stream->c_str(), "Content"));
+
+            {
+                static constexpr std::string_view c_loadedImagePrefix = "Loaded image: ";
+                static constexpr std::string_view c_loadedImageIdPrefix = "Loaded image ID: ";
+
+                for (const auto& entry : shared::string::Split(*parsed.stream, '\n'))
+                {
+                    std::string name;
+                    EnumReferenceFormat format = EnumReferenceFormatNone;
+                    if (entry.starts_with(c_loadedImagePrefix))
+                    {
+                        name = entry.substr(c_loadedImagePrefix.size());
+                        format = EnumReferenceFormatTag;
+                    }
+                    else if (entry.starts_with(c_loadedImageIdPrefix))
+                    {
+                        name = entry.substr(c_loadedImageIdPrefix.size());
+                        format = EnumReferenceFormatDigest;
+                    }
+
+                    if (!name.empty())
+                    {
+                        OnImageCreated(name);
+
+                        if (LoadCallback != nullptr)
+                        {
+                            THROW_IF_FAILED(LoadCallback->OnImageLoaded(name.c_str(), format));
+                        }
+                    }
+                }
+            }
         }
         else if (parsed.status.has_value())
         {
@@ -1342,8 +1404,10 @@ std::optional<std::string> WSLCSession::ImportImageImpl(DockerHTTPClient::HTTPRe
         LOG_LAST_ERROR_IF(shutdown(socket, SD_SEND) == SOCKET_ERROR);
     };
 
-    io.AddHandle(std::make_unique<io::RelayHandle<io::ReadHandle>>(
-        common::io::HandleWrapper{userHandle.Get(), std::move(onInputComplete)}, common::io::HandleWrapper{Request.stream.native_handle()}));
+    io.AddHandle(
+        std::make_unique<io::RelayHandle<io::ReadHandle>>(
+            common::io::HandleWrapper{userHandle.Get(), std::move(onInputComplete)}, common::io::HandleWrapper{Request.stream.native_handle()}),
+        MultiHandleWait::NeedNotComplete);
 
     io.AddHandle(std::make_unique<DockerHTTPClient::DockerHttpResponseHandle>(Request, std::move(onHttpResponse), std::move(onProgress)));
 
@@ -2417,7 +2481,7 @@ try
     RETURN_HR_IF_NULL(E_POINTER, Options->Name);
 
     std::string name = Options->Name;
-    std::string driver = (Options->Driver != nullptr) ? Options->Driver : WSLCBridgeNetworkDriver;
+    std::string driver = Options->Driver != nullptr ? Options->Driver : WSLCBridgeNetworkDriver;
 
     ValidateName(name.c_str(), WSLC_MAX_NETWORK_NAME_LENGTH);
 
@@ -2426,17 +2490,6 @@ try
 
     auto driverOpts = wslutil::ParseKeyValuePairs(Options->DriverOpts, Options->DriverOptsCount);
     auto labels = wslutil::ParseKeyValuePairs(Options->Labels, Options->LabelsCount, WSLCNetworkManagedLabel);
-
-    static constexpr std::array<std::string_view, 3> c_supportedDriverOpts{"Internal", "Subnet", "Gateway"};
-    for (const auto& [key, _] : driverOpts)
-    {
-        const bool supported = std::any_of(
-            c_supportedDriverOpts.begin(), c_supportedDriverOpts.end(), [&](std::string_view opt) { return key == opt; });
-        THROW_HR_WITH_USER_ERROR_IF(E_INVALIDARG, Localization::MessageWslcInvalidNetworkDriverOption(key), !supported);
-    }
-
-    THROW_HR_WITH_USER_ERROR_IF(
-        E_INVALIDARG, Localization::MessageWslcGatewayRequiresSubnet(), driverOpts.contains("Gateway") && !driverOpts.contains("Subnet"));
 
     auto lock = m_lock.lock_shared();
     THROW_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_STATE), !m_dockerClient);
@@ -2451,25 +2504,29 @@ try
     request.Labels = labels;
     request.Labels[WSLCNetworkManagedLabel] = "true";
 
-    if (auto it = driverOpts.find("Internal"); it != driverOpts.end())
-    {
-        request.Internal = (it->second == "true");
-    }
+    request.Internal = static_cast<bool>(Options->Internal);
 
-    if (auto it = driverOpts.find("Subnet"); it != driverOpts.end())
+    THROW_HR_WITH_USER_ERROR_IF(
+        E_INVALIDARG, Localization::MessageWslcGatewayRequiresSubnet(), Options->Gateway != nullptr && Options->Subnet == nullptr);
+
+    if (Options->Subnet != nullptr)
     {
         docker_schema::IPAMConfig ipamConfig;
-        ipamConfig.Subnet = it->second;
+        ipamConfig.Subnet = Options->Subnet;
 
-        auto gatewayIt = driverOpts.find("Gateway");
-        if (gatewayIt != driverOpts.end())
+        if (Options->Gateway != nullptr)
         {
-            ipamConfig.Gateway = gatewayIt->second;
+            ipamConfig.Gateway = Options->Gateway;
         }
 
         auto& ipam = request.IPAM.emplace();
         ipam.Driver = "default";
         ipam.Config.emplace().push_back(std::move(ipamConfig));
+    }
+
+    if (!driverOpts.empty())
+    {
+        request.Options = std::move(driverOpts);
     }
 
     docker_schema::CreateNetworkResponse createResult;
@@ -2509,6 +2566,10 @@ try
     entry.Scope = full.Scope;
     entry.Internal = full.Internal;
     entry.Labels = full.Labels;
+    if (full.Options)
+    {
+        entry.Options = *full.Options;
+    }
     entry.IPAM.Driver = full.IPAM.Driver;
     if (full.IPAM.Config)
     {
@@ -2633,6 +2694,10 @@ try
     result.Scope = entry.Scope;
     result.Internal = entry.Internal;
     result.Labels = entry.Labels;
+    if (!entry.Options.empty())
+    {
+        result.Options = entry.Options;
+    }
 
     result.IPAM.Driver = entry.IPAM.Driver;
     if (entry.IPAM.Config)
@@ -3070,28 +3135,21 @@ HRESULT WSLCSession::PullImage(LPCSTR Image, LPCSTR RegistryAuthenticationInform
     return PullImage(Image, RegistryAuthenticationInformation, progress.Get(), warning.Get());
 }
 
-HRESULT WSLCSession::LoadImage(WSLCCompatHandle ImageHandle, IWSLCCompatProgressCallback* ProgressCallback, ULONGLONG ContentLength, IWSLCCompatWarningCallback* WarningCallback)
+HRESULT WSLCSession::LoadImage(WSLCCompatHandle ImageHandle, IWSLCCompatProgressCallback*, ULONGLONG ContentLength, IWSLCCompatWarningCallback* WarningCallback)
 {
     const auto handle = apicompat::Convert(ImageHandle);
-    const auto progress = apicompat::Convert(ProgressCallback);
     const auto warning = apicompat::Convert(WarningCallback);
 
-    return LoadImage(handle, progress.Get(), ContentLength, warning.Get());
+    return LoadImage(handle, ContentLength, warning.Get(), nullptr);
 }
 
 HRESULT WSLCSession::ImportImage(
-    WSLCCompatHandle ImageHandle,
-    LPCSTR ImageName,
-    IWSLCCompatProgressCallback* ProgressCallback,
-    ULONGLONG ContentLength,
-    IWSLCCompatWarningCallback* WarningCallback,
-    LPSTR* ImageId)
+    WSLCCompatHandle ImageHandle, LPCSTR ImageName, IWSLCCompatProgressCallback*, ULONGLONG ContentLength, IWSLCCompatWarningCallback* WarningCallback, LPSTR* ImageId)
 {
     const auto handle = apicompat::Convert(ImageHandle);
-    const auto progress = apicompat::Convert(ProgressCallback);
     const auto warning = apicompat::Convert(WarningCallback);
 
-    return ImportImage(handle, ImageName, progress.Get(), ContentLength, warning.Get(), ImageId);
+    return ImportImage(handle, ImageName, ContentLength, warning.Get(), ImageId);
 }
 
 HRESULT WSLCSession::ListImages(const WSLCCompatListImagesOptions* Options, WSLCCompatImageInformation** Images, ULONG* Count)
@@ -3353,7 +3411,9 @@ void WSLCSession::OnContainerDeleted(const WSLCContainerImpl* Container)
     auto lock = m_lock.lock_shared();
     std::lock_guard containersLock(m_containersLock);
 
-    WI_VERIFY(m_containers.erase(Container->ID()) == 1);
+    // N.B. once a container transitions to a 'Deleted' state, a call to ListContainers() can remove it from m_containers.
+    // Therefore it's possible that the container is already removed when the callback from Delete() is invoked.
+    m_containers.erase(Container->ID());
 }
 
 HRESULT WSLCSession::GetState(_Out_ WSLCSessionState* State)
@@ -3463,6 +3523,10 @@ void WSLCSession::RecoverExistingNetworks()
             entry.Scope = network.Scope;
             entry.Internal = network.Internal;
             entry.Labels = network.Labels;
+            if (network.Options)
+            {
+                entry.Options = *network.Options;
+            }
             entry.IPAM.Driver = network.IPAM.Driver;
             if (network.IPAM.Config)
             {

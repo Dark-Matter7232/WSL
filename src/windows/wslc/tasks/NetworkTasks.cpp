@@ -95,6 +95,18 @@ void CreateNetwork(CLIExecutionContext& context)
         options.Driver = WideToMultiByte(context.Args.Get<ArgType::Driver>());
     }
 
+    options.Internal = context.Args.Contains(ArgType::Internal);
+
+    if (context.Args.Contains(ArgType::Subnet))
+    {
+        options.Subnet = WideToMultiByte(context.Args.Get<ArgType::Subnet>());
+    }
+
+    if (context.Args.Contains(ArgType::Gateway))
+    {
+        options.Gateway = WideToMultiByte(context.Args.Get<ArgType::Gateway>());
+    }
+
     NetworkService::Create(context.Data.Get<Data::Session>(), options);
     PrintMessage(MultiByteToWide(options.Name));
 }
@@ -214,5 +226,27 @@ void PruneNetworks(CLIExecutionContext& context)
     {
         PrintMessage(Localization::WSLCCLI_NetworkPruneDeleted(MultiByteToWide(networkName)));
     }
+}
+
+void ConnectNetwork(CLIExecutionContext& context)
+{
+    WI_ASSERT(context.Data.Contains(Data::Session));
+    WI_ASSERT(context.Args.Contains(ArgType::NetworkName));
+    WI_ASSERT(context.Args.Contains(ArgType::ContainerId));
+
+    const auto networkName = WideToMultiByte(context.Args.Get<ArgType::NetworkName>());
+    const auto containerId = WideToMultiByte(context.Args.Get<ArgType::ContainerId>());
+    NetworkService::Connect(context.Data.Get<Data::Session>(), networkName, containerId);
+}
+
+void DisconnectNetwork(CLIExecutionContext& context)
+{
+    WI_ASSERT(context.Data.Contains(Data::Session));
+    WI_ASSERT(context.Args.Contains(ArgType::NetworkName));
+    WI_ASSERT(context.Args.Contains(ArgType::ContainerId));
+
+    const auto networkName = WideToMultiByte(context.Args.Get<ArgType::NetworkName>());
+    const auto containerId = WideToMultiByte(context.Args.Get<ArgType::ContainerId>());
+    NetworkService::Disconnect(context.Data.Get<Data::Session>(), networkName, containerId);
 }
 } // namespace wsl::windows::wslc::task

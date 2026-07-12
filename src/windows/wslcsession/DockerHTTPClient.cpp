@@ -302,7 +302,7 @@ void DockerHTTPClient::StartContainer(const std::string& Id, const std::optional
     Transaction(verb::post, url);
 }
 
-void DockerHTTPClient::StopContainer(const std::string& Id, std::optional<WSLCSignal> Signal, std::optional<ULONG> TimeoutSeconds)
+void DockerHTTPClient::StopContainer(const std::string& Id, std::optional<WSLCSignal> Signal, std::optional<LONG> TimeoutSeconds)
 {
     auto url = URL::Create("/containers/{}/stop", Id);
     if (Signal.has_value())
@@ -397,6 +397,31 @@ std::pair<uint32_t, wil::unique_socket> DockerHTTPClient::ExportContainer(const 
     auto [response, socket] = SendRequest(verb::get, URL::Create("/containers/{}/export", ContainerNameOrId), {}, {});
 
     return {response.result_int(), std::move(socket)};
+}
+
+std::unique_ptr<DockerHTTPClient::HTTPRequestContext> DockerHTTPClient::PutArchive(
+    const std::string& ContainerID, const std::string& Path, std::optional<uint64_t> ContentLength)
+{
+    auto url = URL::Create("/containers/{}/archive", ContainerID);
+    url.SetParameter("path", Path);
+
+    std::map<std::string, std::string> headers = {{"Content-Type", "application/x-tar"}};
+    if (ContentLength.has_value())
+    {
+        headers["Content-Length"] = std::to_string(ContentLength.value());
+    }
+
+    return SendRequestImpl(verb::put, url, {}, headers);
+}
+
+std::tuple<uint32_t, wil::unique_socket, bool> DockerHTTPClient::GetArchive(const std::string& ContainerID, const std::string& Path)
+{
+    auto url = URL::Create("/containers/{}/archive", ContainerID);
+    url.SetParameter("path", Path);
+
+    auto [response, socket] = SendRequest(verb::get, url, {}, {});
+
+    return {response.result_int(), std::move(socket), response.chunked()};
 }
 
 docker_schema::Volume DockerHTTPClient::CreateVolume(const docker_schema::CreateVolume& Request)
@@ -663,16 +688,9 @@ void DockerHTTPClient::DockerHttpResponseHandle::OnRead(const gsl::span<char>& C
     {
         // Otherwise keep parsing the HTTP response header.
         size_t i{};
-        for (i = 0; i < Content.size() && LineFeeds < 2; i++)
+        for (i = 0; i < Content.size() && !HeaderEnd.IsDone(); i++)
         {
-            if (Content[i] == '\n')
-            {
-                LineFeeds++;
-            }
-            else if (Content[i] != '\r')
-            {
-                LineFeeds = 0;
-            }
+            HeaderEnd.Consume(Content[i]);
         }
 
         // Feed the parser up to the end of the header.
@@ -805,7 +823,7 @@ std::pair<DockerHTTPClient::HTTPResponse, wil::unique_socket> DockerHTTPClient::
     parser.eager(false);
     parser.skip(false);
 
-    size_t lineFeeds = 0;
+    HttpHeaderEndDetector headerEnd;
     // Consume the socket until the header end is reached
     while (!parser.is_header_done())
     {
@@ -822,16 +840,9 @@ std::pair<DockerHTTPClient::HTTPResponse, wil::unique_socket> DockerHTTPClient::
 
         // Scan only the newly peeked bytes [Offset, Offset + bytesRead)
         size_t i = 0;
-        for (i = Offset; i < bytesRead + Offset && lineFeeds < 2; i++)
+        for (i = Offset; i < bytesRead + Offset && !headerEnd.IsDone(); i++)
         {
-            if (buffer[i] == '\n')
-            {
-                lineFeeds++;
-            }
-            else if (buffer[i] != '\r')
-            {
-                lineFeeds = 0;
-            }
+            headerEnd.Consume(buffer[i]);
         }
 
         WI_ASSERT(i >= Offset);
@@ -847,7 +858,7 @@ std::pair<DockerHTTPClient::HTTPResponse, wil::unique_socket> DockerHTTPClient::
         Offset += bytesRead;
         buffer.resize(Offset);
 
-        if (lineFeeds == 2) // Header is complete, feed it to the parser.
+        if (headerEnd.IsDone()) // Header is complete, feed it to the parser.
         {
 
 #ifdef WSLC_HTTP_DEBUG

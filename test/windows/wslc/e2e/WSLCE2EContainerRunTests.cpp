@@ -568,6 +568,74 @@ class WSLCE2EContainerRunTests
         VERIFY_ARE_EQUAL("127.0.0.1", portBindings[0].HostIp);
     }
 
+    // Verifies that 'session.defaultBindingAddress: default' resolves to the built-in
+    // loopback default (127.0.0.1) for a published port specified without an explicit host IP.
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_Port_DefaultBindingAddress_Default)
+    {
+        const auto settingsPath = wsl::windows::common::filesystem::GetLocalAppDataPath(nullptr) / L"wslc" / L"settings.yaml";
+        HostFileChange settings(settingsPath, "session:\n  defaultBindingAddress: default\n");
+
+        auto result = RunWslc(std::format(
+            L"container run -d --name {} -p {}:{} {} {}",
+            WslcContainerName,
+            HostTestPort1,
+            ContainerTestPort,
+            PythonImage.NameAndTag(),
+            GetPythonHttpServerScript(ContainerTestPort)));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        WaitForContainerOutput(WslcContainerName, "Serving HTTP on");
+
+        ExpectHttpResponse(std::format(L"http://127.0.0.1:{}", HostTestPort1).c_str(), HTTP_STATUS_OK, true);
+
+        auto inspectContainer = InspectContainer(WslcContainerName);
+        auto portKey = std::to_string(ContainerTestPort) + "/tcp";
+        VERIFY_IS_TRUE(inspectContainer.Ports.contains(portKey));
+
+        auto portBindings = inspectContainer.Ports[portKey];
+        VERIFY_ARE_EQUAL(1u, portBindings.size());
+        VERIFY_ARE_EQUAL(std::to_string(HostTestPort1), portBindings[0].HostPort);
+        VERIFY_ARE_EQUAL("127.0.0.1", portBindings[0].HostIp);
+    }
+
+    // Verifies that a configured 'session.defaultBindingAddress' overrides the loopback
+    // default for a published port specified without an explicit host IP.
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_Port_DefaultBindingAddress_Override)
+    {
+        const auto hostIp = GetHostAdapterIpv4();
+        if (!hostIp.has_value())
+        {
+            WEX::Logging::Log::Comment(L"Skipping: no suitable non-loopback host IPv4 address was found.");
+            return;
+        }
+
+        const auto settingsPath = wsl::windows::common::filesystem::GetLocalAppDataPath(nullptr) / L"wslc" / L"settings.yaml";
+        HostFileChange settings(settingsPath, std::format("session:\n  defaultBindingAddress: {}\n", *hostIp));
+
+        auto result = RunWslc(std::format(
+            L"container run -d --name {} -p {}:{} {} {}",
+            WslcContainerName,
+            HostTestPort1,
+            ContainerTestPort,
+            PythonImage.NameAndTag(),
+            GetPythonHttpServerScript(ContainerTestPort)));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        WaitForContainerOutput(WslcContainerName, "Serving HTTP on");
+
+        const auto hostIpWide = std::wstring(hostIp->begin(), hostIp->end());
+        ExpectHttpResponse(std::format(L"http://{}:{}", hostIpWide, HostTestPort1).c_str(), HTTP_STATUS_OK, true);
+
+        auto inspectContainer = InspectContainer(WslcContainerName);
+        auto portKey = std::to_string(ContainerTestPort) + "/tcp";
+        VERIFY_IS_TRUE(inspectContainer.Ports.contains(portKey));
+
+        auto portBindings = inspectContainer.Ports[portKey];
+        VERIFY_ARE_EQUAL(1u, portBindings.size());
+        VERIFY_ARE_EQUAL(std::to_string(HostTestPort1), portBindings[0].HostPort);
+        VERIFY_ARE_EQUAL(wsl::shared::string::WideToMultiByte(*hostIp), portBindings[0].HostIp);
+    }
+
     WSLC_TEST_METHOD(WSLCE2E_Container_Run_Port_TCP)
     {
         // Start a container with a simple server listening on a port
@@ -644,6 +712,48 @@ class WSLCE2EContainerRunTests
         // Wait for cat to exit with code 0
         auto exitCode = session.Wait(10000);
         VERIFY_ARE_EQUAL(0, exitCode, L"Cat should exit with code 0 after receiving EOF");
+        session.VerifyNoErrors();
+    }
+
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_InteractiveNoTTY_SelfExitingCommand)
+    {
+        // Same stdin-relay teardown deadlock as WSLCE2E_Container_Exec_InteractiveNoTTY_SelfExitingCommand (see it
+        // for the root cause), but via `container run -i`. run and exec share the client relay (both route through
+        // AttachToCurrentConsole), so the hang is not exec-specific. The test requires run to exit with the client
+        // still holding stdin open; RunWslcInteractive supplies stdin as a synchronous (non-overlapped) pipe, the
+        // case that triggers the bug.
+        VerifyContainerIsNotListed(WslcContainerName);
+
+        auto session =
+            RunWslcInteractive(std::format(L"container run -i --name {} {} echo hello", WslcContainerName, DebianImage.NameAndTag()));
+
+        session.ExpectStdout("hello\n");
+
+        // Generous timeout: it only bounds the failure (hang) path.
+        auto exitCode = session.Wait(120000);
+        VERIFY_ARE_EQUAL(0, exitCode, L"echo should exit with code 0 without the client closing stdin");
+
+        // Closing stdin after exit must stay a clean no-op.
+        session.CloseStdin();
+        session.VerifyNoErrors();
+    }
+
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_InteractiveTTY_SelfExitingCommand)
+    {
+        // TTY counterpart of the above: `-t` routes through ConsoleService::RelayInteractiveTty, a separate
+        // stdin-worker teardown from the non-TTY path, so it could regress independently. Guards the TTY run path.
+        VerifyContainerIsNotListed(WslcContainerName);
+
+        auto session =
+            RunWslcInteractive(std::format(L"container run -it --name {} {} echo hello", WslcContainerName, DebianImage.NameAndTag()));
+
+        // The TTY translates the trailing LF to CRLF.
+        session.ExpectStdout("hello\r\n");
+
+        auto exitCode = session.Wait(120000);
+        VERIFY_ARE_EQUAL(0, exitCode, L"echo should exit with code 0 without the client closing stdin");
+
+        session.CloseStdin();
         session.VerifyNoErrors();
     }
 
@@ -903,6 +1013,85 @@ class WSLCE2EContainerRunTests
         VERIFY_ARE_EQUAL(ExpectedExitCode, inspect.State.ExitCode);
     }
 
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_StopTimeout)
+    {
+        // A positive value is forwarded to the container configuration.
+        {
+            constexpr int ExpectedStopTimeout = 25;
+            auto result = RunWslc(std::format(
+                L"container run -d --stop-timeout {} --name {} {} sleep infinity",
+                ExpectedStopTimeout,
+                WslcContainerName,
+                DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"", .ExitCode = 0});
+
+            const auto inspect = InspectContainer(WslcContainerName);
+            VERIFY_IS_TRUE(inspect.Config.StopTimeout.has_value());
+            VERIFY_ARE_EQUAL(ExpectedStopTimeout, inspect.Config.StopTimeout.value());
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+
+        // A value of 0 (stop the container immediately) is a valid, explicit timeout.
+        {
+            auto result = RunWslc(std::format(
+                L"container run -d --stop-timeout 0 --name {} {} sleep infinity", WslcContainerName, DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"", .ExitCode = 0});
+
+            const auto inspect = InspectContainer(WslcContainerName);
+            VERIFY_IS_TRUE(inspect.Config.StopTimeout.has_value());
+            VERIFY_ARE_EQUAL(0, inspect.Config.StopTimeout.value());
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+
+        // A value of -1 means "no timeout"; it is a valid, explicit value forwarded to the configuration.
+        {
+            auto result = RunWslc(std::format(
+                L"container run -d --stop-timeout -1 --name {} {} sleep infinity", WslcContainerName, DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"", .ExitCode = 0});
+
+            const auto inspect = InspectContainer(WslcContainerName);
+            VERIFY_IS_TRUE(inspect.Config.StopTimeout.has_value());
+            VERIFY_ARE_EQUAL(-1, inspect.Config.StopTimeout.value());
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+
+        // When --stop-timeout is not specified, no timeout is forwarded to the container configuration.
+        {
+            auto result =
+                RunWslc(std::format(L"container run -d --name {} {} sleep infinity", WslcContainerName, DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"", .ExitCode = 0});
+
+            const auto inspect = InspectContainer(WslcContainerName);
+            VERIFY_IS_FALSE(inspect.Config.StopTimeout.has_value());
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+    }
+
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_StopTimeout_Invalid)
+    {
+        {
+            auto result =
+                RunWslc(std::format(L"container run --rm --stop-timeout abc --name {} {}", WslcContainerName, DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"Invalid stop-timeout argument value: abc\r\n", .ExitCode = 1});
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+
+        {
+            auto result =
+                RunWslc(std::format(L"container run --rm --stop-timeout -2 --name {} {}", WslcContainerName, DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"Invalid stop timeout value: -2\r\nError code: E_INVALIDARG\r\n", .ExitCode = 1});
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+
+        // Validate that the correct error is displayed if the user passes the exact 'WSLC_STOP_TIMEOUT_DEFAULT' value.
+        {
+            auto result = RunWslc(std::format(
+                L"container run --rm --stop-timeout {} --name {} {}", WSLC_STOP_TIMEOUT_DEFAULT, WslcContainerName, DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"Invalid stop timeout value: -2147483648\r\nError code: E_INVALIDARG\r\n", .ExitCode = 1});
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+    }
+
     WSLC_TEST_METHOD(WSLCE2E_Container_Run_ShmSize)
     {
         auto result = RunWslc(std::format(L"container run --rm --shm-size 128M {} df -h /dev/shm", DebianImage.NameAndTag()));
@@ -925,6 +1114,102 @@ class WSLCE2EContainerRunTests
             result.Verify({.Stderr = L"Invalid shm-size argument value: '128X'. Expected a memory size (e.g. 256M, 1G)\r\n", .ExitCode = 1});
             EnsureContainerDoesNotExist(WslcContainerName);
         }
+    }
+
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_HealthCheck)
+    {
+        // All health-check options are forwarded to the container configuration.
+        {
+            auto result = RunWslc(std::format(
+                LR"(container run -d --health-cmd "exit 0" --health-interval 5s --health-timeout 3s --health-retries 2 --health-start-period 1s --name {} {} sleep infinity)",
+                WslcContainerName,
+                DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"", .ExitCode = 0});
+
+            const auto inspect = InspectContainer(WslcContainerName);
+            VERIFY_IS_TRUE(inspect.Config.Healthcheck.has_value());
+
+            const auto& health = inspect.Config.Healthcheck.value();
+            VERIFY_IS_TRUE(health.Test.has_value());
+            const std::vector<std::string> expectedTest{"CMD-SHELL", "exit 0"};
+            VERIFY_ARE_EQUAL(expectedTest, health.Test.value());
+
+            // Durations are reported in nanoseconds.
+            VERIFY_ARE_EQUAL(5'000'000'000LL, health.Interval.value_or(0));
+            VERIFY_ARE_EQUAL(3'000'000'000LL, health.Timeout.value_or(0));
+            VERIFY_ARE_EQUAL(1'000'000'000LL, health.StartPeriod.value_or(0));
+            VERIFY_ARE_EQUAL(2, health.Retries.value_or(0));
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+
+        // When no health option is specified, no health check is forwarded.
+        {
+            auto result =
+                RunWslc(std::format(L"container run -d --name {} {} sleep infinity", WslcContainerName, DebianImage.NameAndTag()));
+            result.Verify({.Stderr = L"", .ExitCode = 0});
+
+            const auto inspect = InspectContainer(WslcContainerName);
+            VERIFY_IS_FALSE(inspect.Config.Healthcheck.has_value());
+            EnsureContainerDoesNotExist(WslcContainerName);
+        }
+    }
+
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_HealthCheck_Invalid)
+    {
+        auto result = RunWslc(
+            std::format(L"container run --rm --health-timeout invalid --name {} {}", WslcContainerName, DebianImage.NameAndTag()));
+        result.Verify({.Stderr = L"Invalid health-timeout argument value: 'invalid'. Expected a duration (e.g. 30s, 1m30s)\r\n", .ExitCode = 1});
+        EnsureContainerDoesNotExist(WslcContainerName);
+    }
+
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_HealthStatus_Healthy)
+    {
+        // A health check that always succeeds should drive the container to the "healthy" state.
+        auto result = RunWslc(std::format(
+            LR"(container run -d --health-cmd "exit 0" --health-interval 1s --health-timeout 3s --health-retries 1 --name {} {} sleep infinity)",
+            WslcContainerName,
+            DebianImage.NameAndTag()));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        const auto health = WaitForContainerHealth(WslcContainerName, "healthy");
+        VERIFY_ARE_EQUAL(0, health.FailingStreak);
+        VERIFY_IS_FALSE(health.Log.empty());
+        VERIFY_ARE_EQUAL(0, health.Log.back().ExitCode);
+
+        EnsureContainerDoesNotExist(WslcContainerName);
+    }
+
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_HealthStatus_Unhealthy)
+    {
+        // A health check that always fails should drive the container to the "unhealthy" state.
+        auto result = RunWslc(std::format(
+            LR"(container run -d --health-cmd "exit 1" --health-interval 1s --health-timeout 3s --health-retries 1 --name {} {} sleep infinity)",
+            WslcContainerName,
+            DebianImage.NameAndTag()));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        const auto health = WaitForContainerHealth(WslcContainerName, "unhealthy");
+        VERIFY_IS_TRUE(health.FailingStreak >= 1);
+        VERIFY_IS_FALSE(health.Log.empty());
+        VERIFY_ARE_EQUAL(1, health.Log.back().ExitCode);
+
+        EnsureContainerDoesNotExist(WslcContainerName);
+    }
+
+    WSLC_TEST_METHOD(WSLCE2E_Container_Run_HealthStatus_Timeout)
+    {
+        auto result = RunWslc(std::format(
+            LR"(container run -d --health-cmd "sleep 30" --health-interval 1s --health-timeout 1s --health-retries 1 --name {} {} sleep infinity)",
+            WslcContainerName,
+            DebianImage.NameAndTag()));
+        result.Verify({.Stderr = L"", .ExitCode = 0});
+
+        const auto health = WaitForContainerHealth(WslcContainerName, "unhealthy");
+        VERIFY_IS_TRUE(health.FailingStreak >= 1);
+        VERIFY_IS_FALSE(health.Log.empty());
+        VERIFY_ARE_EQUAL(-1, health.Log.back().ExitCode);
+
+        EnsureContainerDoesNotExist(WslcContainerName);
     }
 
     WSLC_TEST_METHOD(WSLCE2E_Container_Run_Cpus)
@@ -1075,9 +1360,9 @@ private:
     {
         std::wstringstream commands;
         commands << L"The following arguments are available:\r\n"
-                 << L"  image             Image name\r\n"
-                 << L"  command           The command to run\r\n"
-                 << L"  arguments         Arguments to pass to container's init process\r\n"
+                 << L"  image                  Image name\r\n"
+                 << L"  command                The command to run\r\n"
+                 << L"  arguments              Arguments to pass to container's init process\r\n"
                  << L"\r\n";
         return commands.str();
     }
@@ -1085,38 +1370,47 @@ private:
     std::wstring GetAvailableOptions() const
     {
         std::wstringstream options;
-        options << L"The following options are available:\r\n"
-                << L"  --cidfile         Write the container ID to the provided path\r\n"
-                << L"  --cpus            Number of CPUs (e.g. 0.5, 1, 2.5)\r\n"
-                << L"  -d,--detach       Run container in detached mode\r\n"
-                << L"  --dns             IP address of the DNS nameserver in resolv.conf\r\n"
-                << L"  --dns-option      Set DNS options\r\n"
-                << L"  --dns-search      Set DNS search domains\r\n"
-                << L"  --domainname      Container domain name\r\n"
-                << L"  --entrypoint      Specifies the container init process executable\r\n"
-                << L"  -e,--env          Key=Value pairs for environment variables\r\n"
-                << L"  --env-file        File containing key=value pairs of env variables\r\n"
-                << L"  --gpus            Add GPU devices to the container ('all' to pass all GPUs)\r\n"
-                << L"  -h,--hostname     Container host name\r\n"
-                << L"  -i,--interactive  Attach to stdin and keep it open\r\n"
-                << L"  -l,--label        Set metadata on an object\r\n"
-                << L"  -m,--memory       Memory limit (e.g. 512M, 1G)\r\n"
-                << L"  --name            Name of the container\r\n"
-                << L"  --network         Connect a container to a network\r\n"
-                << L"  --network-alias   Add a network-scoped alias for the container\r\n"
-                << L"  -p,--publish      Publish a port from a container to host\r\n"
-                << L"  -P,--publish-all  Publish all exposed ports to random host ports\r\n"
-                << L"  --rm              Remove the container after it stops\r\n"
-                << L"  --shm-size        Size of /dev/shm (e.g. 64M, 1G)\r\n"
-                << L"  --stop-signal     Signal to stop the container\r\n"
-                << L"  --tmpfs           Mount tmpfs to the container at the given path\r\n"
-                << L"  -t,--tty          Open a TTY with the container process.\r\n"
-                << L"  --ulimit          Ulimit options (format: <name>=<soft>[:<hard>], use -1 for unlimited)\r\n"
-                << L"  -u,--user         User ID for the process (name|uid|uid:gid)\r\n"
-                << L"  -v,--volume       Bind mount a volume to the container\r\n"
-                << L"  -w,--workdir      Working directory inside the container\r\n"
-                << L"  -?,--help         Shows help about the selected command\r\n"
-                << L"\r\n";
+        options
+            << L"The following options are available:\r\n"
+            << L"  --cidfile              Write the container ID to the provided path\r\n"
+            << L"  --cpus                 Number of CPUs (e.g. 0.5, 1, 2.5)\r\n"
+            << L"  -d,--detach            Run container in detached mode\r\n"
+            << L"  --dns                  IP address of the DNS nameserver in resolv.conf\r\n"
+            << L"  --dns-option           Set DNS options\r\n"
+            << L"  --dns-search           Set DNS search domains\r\n"
+            << L"  --domainname           Container domain name\r\n"
+            << L"  --entrypoint           Specifies the container init process executable\r\n"
+            << L"  -e,--env               Key=Value pairs for environment variables\r\n"
+            << L"  --env-file             File containing key=value pairs of env variables\r\n"
+            << L"  --gpus                 Add GPU devices to the container ('all' to pass all GPUs)\r\n"
+            << L"  --health-cmd           Command to run to check container health\r\n"
+            << L"  --health-interval      Time between running the health check (e.g. 30s, 1m30s)\r\n"
+            << L"  --health-retries       Consecutive failures needed to report the container as unhealthy\r\n"
+            << L"  --health-start-period  Start period for the container to initialize before health-check countdown (e.g. 30s, "
+               L"1m30s)\r\n"
+            << L"  --health-timeout       Maximum time to allow one health check to run (e.g. 30s, 1m30s)\r\n"
+            << L"  -h,--hostname          Container host name\r\n"
+            << L"  -i,--interactive       Attach to stdin and keep it open\r\n"
+            << L"  -l,--label             Set metadata on an object\r\n"
+            << L"  -m,--memory            Memory limit (e.g. 512M, 1G)\r\n"
+            << L"  --name                 Name of the container\r\n"
+            << L"  --network              Connect a container to a network\r\n"
+            << L"  --network-alias        Add a network-scoped alias for the container\r\n"
+            << L"  --no-healthcheck       Disable any container-specified health check\r\n"
+            << L"  -p,--publish           Publish a port from a container to host\r\n"
+            << L"  -P,--publish-all       Publish all exposed ports to random host ports\r\n"
+            << L"  --rm                   Remove the container after it stops\r\n"
+            << L"  --shm-size             Size of /dev/shm (e.g. 64M, 1G)\r\n"
+            << L"  --stop-signal          Signal to stop the container\r\n"
+            << L"  --stop-timeout         Timeout (in seconds) to stop the container before killing it (-1 for no timeout)\r\n"
+            << L"  --tmpfs                Mount tmpfs to the container at the given path\r\n"
+            << L"  -t,--tty               Open a TTY with the container process.\r\n"
+            << L"  --ulimit               Ulimit options (format: <name>=<soft>[:<hard>], use -1 for unlimited)\r\n"
+            << L"  -u,--user              User ID for the process (name|uid|uid:gid)\r\n"
+            << L"  -v,--volume            Bind mount a volume to the container\r\n"
+            << L"  -w,--workdir           Working directory inside the container\r\n"
+            << L"  -?,--help              Shows help about the selected command\r\n"
+            << L"\r\n";
         return options.str();
     }
 };

@@ -139,12 +139,8 @@ void WriteTestFileContent(const std::filesystem::path& filePath, const std::stri
 // Sets up a clean test directory and returns a scope_exit to remove it.
 inline auto SetupTestDirectory(const std::filesystem::path& directory)
 {
-    std::error_code ec;
-    std::filesystem::remove_all(directory, ec);
-    THROW_HR_IF_MSG(E_FAIL, ec.value() != 0 && std::filesystem::exists(directory), "%hs", ec.message().c_str());
-
-    std::filesystem::create_directories(directory, ec);
-    THROW_HR_IF_MSG(E_FAIL, ec.value() != 0 || !std::filesystem::exists(directory), "%hs", ec.message().c_str());
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
 
     return wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [directory]() {
         std::error_code removeError;
@@ -158,6 +154,9 @@ std::wstring GetPythonUdpEchoServerScript(uint16_t port);
 std::string SendUdpAndReceive(uint16_t hostPort, const std::string& payload, const std::string& expectedReply, int family = AF_INET);
 
 void WaitForContainerOutput(const std::wstring& containerName, std::string_view expected, std::chrono::milliseconds timeout = std::chrono::seconds(60));
+
+wsl::windows::common::wslc_schema::Health WaitForContainerHealth(
+    const std::wstring& containerName, const std::string_view& expectedStatus, std::chrono::milliseconds timeout = std::chrono::seconds(120));
 
 // Default timeout of 0 will execute once.
 template <typename IntervalRep, typename IntervalPeriod, typename TimeoutRep, typename TimeoutPeriod>
