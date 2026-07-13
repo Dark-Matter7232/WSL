@@ -1612,6 +1612,13 @@ Return Value:
 
     if (Config.GuiAppsEnabled)
     {
+        //
+        // Force Mesa to use the D3D12 Gallium backend for WSLg applications.
+        // On Snapdragon X, Mesa may otherwise fall back to llvmpipe even though
+        // GPU acceleration is available.
+        //
+        Environment.AddVariable("GALLIUM_DRIVER", "d3d12");
+
         for (const auto& Var : ConfigGetWslgEnvironmentVariables(Config))
         {
             Environment.AddVariable(Var.first, Var.second);
