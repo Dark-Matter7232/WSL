@@ -1513,6 +1513,60 @@ class WslcSdkTests
         VERIFY_ARE_EQUAL(missing, WSLC_COMPONENT_FLAG_NONE);
     }
 
+    WSLC_TEST_METHOD(InstallWithDependencies_NoComponents_Succeeds)
+    {
+        // Passing WSLC_COMPONENT_FLAG_NONE must return S_OK immediately without requiring elevation.
+        VERIFY_SUCCEEDED(WslcInstallWithDependencies(WSLC_COMPONENT_FLAG_NONE, WSLC_INSTALL_OPTION_NONE, nullptr, nullptr));
+    }
+
+    WSLC_TEST_METHOD(InstallWithDependencies_SdkNeedsUpdate_ReturnsError)
+    {
+        // Passing SDK_NEEDS_UPDATE must always return WSLC_E_SDK_UPDATE_NEEDED — the caller must update their SDK.
+        VERIFY_ARE_EQUAL(
+            WSLC_E_SDK_UPDATE_NEEDED,
+            WslcInstallWithDependencies(WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE, WSLC_INSTALL_OPTION_NONE, nullptr, nullptr));
+    }
+
+    WSLC_TEST_METHOD(InstallWithDependencies_WslPackage_GhFallback404)
+    {
+        // Without repair semantics, DCAT uses EnsureProductRegistration so it should find no update
+        // (the product is already registered at the current version). The code then falls back to the
+        // GitHub release endpoint. This test intercepts that fallback: the fake API server returns a
+        // release whose asset URL points at a second local server that always responds with HTTP 404,
+        // so the download fails and WslcInstallWithDependencies surfaces an error HRESULT.
+        constexpr auto apiEndpoint = L"http://127.0.0.1:12345/";
+        constexpr auto assetEndpoint = L"http://127.0.0.1:12346/";
+
+        RegistryKeyChange<std::wstring> urlOverride(
+            HKEY_LOCAL_MACHINE,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Lxss",
+            wsl::windows::common::wslutil::c_githubUrlOverrideRegistryValue,
+            apiEndpoint);
+
+        // Version 1.0.0 is below the current package version, so without repair=true the version
+        // check in UpdatePackageImpl would short-circuit and return early. Using a sub-2.0 version
+        // here confirms that the repair flag (always set in the GH fallback) is what drives the
+        // download attempt rather than the version being newer than the installed one.
+        constexpr auto GitHubApiResponse =
+            LR"([{
+                \"name\": \"1.0.0\",
+                \"created_at\": \"2023-06-14T16:56:30Z\",
+                \"assets\": [
+                    {
+                        \"url\": \"http://127.0.0.1:12346/fake.msixbundle\",
+                        \"id\": 1,
+                        \"name\": \"Microsoft.WSL_1.0.0.0_x64_ARM64.msixbundle\"
+                    }
+                ]
+            }])";
+
+        UniqueWebServer apiServer(apiEndpoint, GitHubApiResponse);
+        UniqueWebServer assetServer(assetEndpoint, L"", 404u);
+
+        VERIFY_ARE_EQUAL(
+            HTTP_E_STATUS_NOT_FOUND, WslcInstallWithDependencies(WSLC_COMPONENT_FLAG_WSL_PACKAGE, WSLC_INSTALL_OPTION_NONE, nullptr, nullptr));
+    }
+
     // -----------------------------------------------------------------------
     // WslcSetProcessSettingsCallbacks tests
     // -----------------------------------------------------------------------
@@ -2281,19 +2335,27 @@ class WslcSdkTests
         {
             wil::unique_cotaskmem_ansistring token;
             wil::unique_cotaskmem_string errorMsg;
+            WslcIdentityTokenType tokenType{};
             VERIFY_ARE_EQUAL(
-                WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), c_username, "wrong-password", &token, &errorMsg), E_FAIL);
+                WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), c_username, "wrong-password", &token, &tokenType, &errorMsg),
+                E_FAIL);
             VERIFY_IS_NOT_NULL(errorMsg.get());
+            VERIFY_ARE_EQUAL(tokenType, WSLC_IDENTITY_TOKEN_TYPE_UNKNOWN);
         }
 
-        // Positive: correct credentials must succeed and return a non-null token.
+        // Positive: correct credentials must succeed and return a non-null, registry-auth-ready token.
         {
             wil::unique_cotaskmem_ansistring token;
             wil::unique_cotaskmem_string errorMsg;
-            VERIFY_SUCCEEDED(WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), c_username, c_password, &token, &errorMsg));
+            WslcIdentityTokenType tokenType{};
+            VERIFY_SUCCEEDED(WslcSessionAuthenticate(
+                m_defaultSession, registryAddress.c_str(), c_username, c_password, &token, &tokenType, &errorMsg));
             VERIFY_IS_NOT_NULL(token.get());
+            // The local test registry does not return an identity token, so credentials are embedded.
+            VERIFY_ARE_EQUAL(tokenType, WSLC_IDENTITY_TOKEN_TYPE_CREDENTIALS);
         }
 
+        // The local registry requires auth; push the test image for the pull tests below.
         auto xRegistryAuth = wsl::windows::common::wslutil::BuildRegistryAuthHeader(c_username, c_password);
         PushImageToRegistry("hello-world", "latest", registryAddress, xRegistryAuth);
 
@@ -2302,11 +2364,16 @@ class WslcSdkTests
         auto imageCleanup = wil::scope_exit_log(
             WI_DIAGNOSTICS_INFO, [&]() { LOG_IF_FAILED(WslcDeleteSessionImage(m_defaultSession, image.c_str(), nullptr)); });
 
-        // Pulling with credentials should succeed.
+        // Positive: pulling with the identityToken from WslcSessionAuthenticate directly should succeed,
+        // demonstrating that the output can be passed as registryAuth without any transformation.
         {
+            wil::unique_cotaskmem_ansistring authToken;
+            VERIFY_SUCCEEDED(WslcSessionAuthenticate(
+                m_defaultSession, registryAddress.c_str(), c_username, c_password, &authToken, nullptr, nullptr));
+
             WslcPullImageOptions opts{};
             opts.uri = image.c_str();
-            opts.registryAuth = xRegistryAuth.c_str();
+            opts.registryAuth = authToken.get();
             VERIFY_SUCCEEDED(WslcPullSessionImage(m_defaultSession, &opts, nullptr));
             VERIFY_IS_TRUE(HasImage(image));
         }
@@ -2334,13 +2401,16 @@ class WslcSdkTests
             VERIFY_IS_NOT_NULL(errorMsg.get());
         }
 
-        // Negative: null parameters must fail.
+        // Negative: null parameters must fail; tokenType is optional and may be null.
         {
             wil::unique_cotaskmem_ansistring token;
-            VERIFY_ARE_EQUAL(WslcSessionAuthenticate(m_defaultSession, nullptr, c_username, c_password, &token, nullptr), E_POINTER);
-            VERIFY_ARE_EQUAL(WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), nullptr, c_password, &token, nullptr), E_POINTER);
-            VERIFY_ARE_EQUAL(WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), c_username, nullptr, &token, nullptr), E_POINTER);
-            VERIFY_ARE_EQUAL(WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), c_username, c_password, nullptr, nullptr), E_POINTER);
+            VERIFY_ARE_EQUAL(WslcSessionAuthenticate(m_defaultSession, nullptr, c_username, c_password, &token, nullptr, nullptr), E_POINTER);
+            VERIFY_ARE_EQUAL(
+                WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), nullptr, c_password, &token, nullptr, nullptr), E_POINTER);
+            VERIFY_ARE_EQUAL(
+                WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), c_username, nullptr, &token, nullptr, nullptr), E_POINTER);
+            VERIFY_ARE_EQUAL(
+                WslcSessionAuthenticate(m_defaultSession, registryAddress.c_str(), c_username, c_password, nullptr, nullptr, nullptr), E_POINTER);
         }
     }
 
