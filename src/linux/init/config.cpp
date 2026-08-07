@@ -2623,9 +2623,8 @@ try
         // If the current line contains the "LANG=" string, update the
         // environment block with the remainder of the line.
         //
-        // N.B. No validation is done on the contents of the string. If the
-        //      file contains multiple lines containing "LANG=" the last will
-        //      be used.
+        // N.B. If the file contains multiple lines containing "LANG=" the last
+        //      will be used.
         //
 
         auto Content = strstr(Line, LANG_ENV "=");
@@ -2643,7 +2642,8 @@ try
                 *SpecialCharacter = '\0';
             }
 
-            Environment.AddVariable(LANG_ENV, Content);
+            const auto Value = wsl::shared::string::UnescapeShell(wsl::shared::string::Trim(std::string{Content}));
+            Environment.AddVariable(LANG_ENV, Value);
         }
     }
 

@@ -126,6 +126,14 @@ void BuildImage(CLIExecutionContext& context)
         target = context.Args.Get<ArgType::BuildTarget>();
     }
 
+    std::optional<services::BuildOutput> output;
+    if (context.Args.Contains(ArgType::Output))
+    {
+        // Validate and normalize the spec client-side; ImageService::Build decides how to route the
+        // exporter (stream a destination file/dir back over a handle, or run entirely in the VM).
+        output = validation::ParseOutputSpec(context.Args.Get<ArgType::Output>());
+    }
+
     WSLCBuildImageFlags flags = WSLCBuildImageFlagsNone;
     WI_SetFlagIf(flags, WSLCBuildImageFlagsVerbose, context.Args.GetFlag<ArgType::Verbose>());
     WI_SetFlagIf(flags, WSLCBuildImageFlagsNoCache, context.Args.GetFlag<ArgType::NoCache>());
@@ -133,7 +141,8 @@ void BuildImage(CLIExecutionContext& context)
 
     auto cancelEvent = context.CreateCancelEvent();
     BuildImageCallback callback(context.Reporter, cancelEvent, context.Args.GetFlag<ArgType::Verbose>());
-    services::ImageService::Build(session, contextPath, tags, buildArgs, labels, secrets, dockerfilePath, target, flags, &callback, cancelEvent);
+    services::ImageService::Build(
+        session, contextPath, tags, buildArgs, labels, secrets, dockerfilePath, target, output, flags, &callback, cancelEvent);
 }
 
 void GetImages(CLIExecutionContext& context)
@@ -175,17 +184,13 @@ void ListImages(CLIExecutionContext& context)
         return;
     }
 
-    FormatType format = FormatType::Table; // Default is table
-    if (context.Args.Contains(ArgType::Format))
-    {
-        format = validation::GetFormatTypeFromString(context.Args.Get<ArgType::Format>());
-    }
+    FormatType format = validation::GetOutputFormat(context.Args);
 
     switch (format)
     {
     case FormatType::Json:
     {
-        auto json = ToJson(images, c_jsonPrettyPrintIndent);
+        auto json = ToJson(images, c_jsonCompactIndent);
         context.Reporter.Output(L"{}\n", MultiByteToWide(json));
         break;
     }
@@ -341,7 +346,7 @@ void InspectImages(CLIExecutionContext& context)
         }
     }
 
-    auto json = ToJson(result, c_jsonPrettyPrintIndent);
+    auto json = ToJson(result, validation::GetInspectJsonIndent(context.Args));
     context.Reporter.Output(L"{}\n", MultiByteToWide(json));
 }
 

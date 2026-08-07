@@ -209,6 +209,10 @@ wil::com_ptr<IWSLCSession> OpenDefaultElevatedSession();
 
 void VerifyPseudoConsoleTtySize(WSLCInteractiveSession& session, SHORT columns, SHORT rows);
 
+// Waits for a substring to appear in the session's pseudo console output.
+void WaitForPseudoConsoleOutput(
+    const WSLCInteractiveSession& session, const std::string& expected, std::chrono::seconds timeout = std::chrono::seconds(60));
+
 // Starts a local registry container using the COM API and returns the running container (holds it
 // alive) plus the registry address. Host network for plain http, bridge network for tls enabled.
 std::pair<wsl::windows::common::RunningWSLCContainer, std::string> StartLocalRegistry(
@@ -220,6 +224,17 @@ std::pair<wsl::windows::common::RunningWSLCContainer, std::string> StartLocalReg
 
 // Tags an image for a registry and returns the full registry image reference (e.g. "127.0.0.1:PORT/debian:latest").
 std::wstring TagImageForRegistry(const std::wstring& imageName, const std::wstring& registryAddress);
+
+// Verifies "--format json" output was emitted as a single compact line and returns the parsed document.
+inline nlohmann::json VerifyCompactJsonOutput(const WSLCExecutionResult& result)
+{
+    VERIFY_IS_TRUE(result.Stdout.has_value());
+
+    const auto lines = result.GetStdoutLines();
+    VERIFY_ARE_EQUAL(1u, lines.size(), L"'--format json' output must be a single line");
+
+    return nlohmann::json::parse(wsl::shared::string::WideToMultiByte(lines[0]));
+}
 
 // Verifies that a string is a valid hex ID output.
 // truncated=true expects 12 hex chars, truncated=false expects 64 hex chars.
