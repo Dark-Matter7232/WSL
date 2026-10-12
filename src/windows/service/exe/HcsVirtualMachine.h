@@ -84,6 +84,7 @@ private:
     wil::shared_handle m_userToken;
     WSLCFeatureFlags m_featureFlags{};
     WSLCNetworkingMode m_networkingMode{};
+    std::string m_hostLoopback;
 
     bool m_swiotlbConfigured = false;
 
@@ -99,6 +100,7 @@ private:
 
     // Shares: key is ShareId, value is nullopt for Plan9 or the aggregate DeviceInstanceId for VirtioFS.
     std::map<GUID, std::optional<GUID>, wsl::windows::common::helpers::GuidLess> m_shares;
+    wil::com_ptr<IPlan9FileSystem> m_plan9Server;
     std::optional<GUID> m_virtioFsDevice;
 
     std::filesystem::path m_vmSavedStateFile;
@@ -150,6 +152,7 @@ private:
     ULONG m_bootTimeoutMs{};
     WSLCNetworkingMode m_networkingMode{};
     WSLCFeatureFlags m_featureFlags{};
+    std::string m_hostLoopback;
     WSLCSessionStorageFlags m_storageFlags{};
 };
 

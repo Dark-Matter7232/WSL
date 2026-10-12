@@ -14,6 +14,7 @@ Abstract:
 
 #include "HcsVirtualMachine.h"
 #include <format>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include "hcs_schema.h"
@@ -89,6 +90,7 @@ HcsVirtualMachine::HcsVirtualMachine(_In_ const WSLCSessionSettings* Settings)
     m_vmIdString = wsl::shared::string::GuidToString<wchar_t>(m_vmId, wsl::shared::string::GuidToStringFlags::Uppercase);
     m_featureFlags = Settings->FeatureFlags;
     m_networkingMode = Settings->NetworkingMode;
+    m_hostLoopback = Settings->HostLoopback ? Settings->HostLoopback : "";
     m_bootTimeoutMs = Settings->BootTimeoutMs;
 
     // Build HCS settings
@@ -120,10 +122,16 @@ HcsVirtualMachine::HcsVirtualMachine(_In_ const WSLCSessionSettings* Settings)
     vmSettings.ComputeTopology.Memory.EnableColdDiscardHint = true;
     vmSettings.ComputeTopology.Processor.Count = Settings->CpuCount;
 
+    const auto windowsVersion = wsl::windows::common::helpers::GetWindowsVersion();
+    if (windowsVersion.BuildNumber >= WindowsBuildNumbers::Germanium)
+    {
+        // Let HCS derive a virtual NUMA topology from the requested resources and the host topology.
+        vmSettings.ComputeTopology.Numa.emplace();
+    }
+
     // Configure backing page size, fault cluster shift size, and page reporting order to favor density (lower vmmem usage).
     //
     // N.B. Page reporting order must be >= fault cluster size shift.
-    const auto windowsVersion = wsl::windows::common::helpers::GetWindowsVersion();
     int pageReportingOrder;
     if (windowsVersion.BuildNumber >= WindowsBuildNumbers::Germanium)
     {
@@ -236,7 +244,7 @@ HcsVirtualMachine::HcsVirtualMachine(_In_ const WSLCSessionSettings* Settings)
 #ifdef WSL_KERNEL_MODULES_PATH
     auto kernelModulesPath = std::filesystem::path(TEXT(WSL_KERNEL_MODULES_PATH));
 #else
-    auto kernelModulesPath = basePath / L"tools" / L"modules.vhd";
+    auto kernelModulesPath = basePath / L"tools" / L"artifacts.vhd";
 #endif
 
     // Get root VHD path
@@ -352,9 +360,9 @@ HcsVirtualMachine::~HcsVirtualMachine()
     // on in-flight HCS exit/crash callbacks, which may themselves need m_lock. OnExit() is lock-free,
     // and closing the compute system drains all callbacks, so the rest of teardown needs no lock.
 
-    // Wait up to 5 seconds for the VM to terminate gracefully.
+    // Wait up to 30 seconds for the VM to terminate gracefully.
     bool forceTerminate = false;
-    if (!m_vmExitEvent.wait(5000))
+    if (!m_vmExitEvent.wait(30000))
     {
         forceTerminate = true;
         try
@@ -371,6 +379,11 @@ HcsVirtualMachine::~HcsVirtualMachine()
     // GuestDeviceManager, so it must be released first for the device manager reset to be effective.
     m_networkEngine.reset();
     m_guestDeviceManager.reset();
+    if (m_plan9Server)
+    {
+        LOG_IF_FAILED(m_plan9Server->Teardown());
+        m_plan9Server.reset();
+    }
     m_computeSystem.reset();
 
     // Revoke VM access for attached disks
@@ -380,7 +393,7 @@ HcsVirtualMachine::~HcsVirtualMachine()
         {
             if (e.second.AccessGranted)
             {
-                hcs::RevokeVmAccess(m_vmIdString.c_str(), e.second.Path.c_str());
+                hcs::RevokeVmAccess(m_vmIdString.c_str(), e.second.Path.c_str(), m_userToken.get());
             }
         }
         CATCH_LOG()
@@ -419,7 +432,7 @@ try
 {
     RETURN_HR_IF_NULL(E_POINTER, Socket);
 
-    auto socket = socket::CancellableAccept(m_listenSocket.get(), m_bootTimeoutMs, m_vmExitEvent.get());
+    auto socket = wsl::windows::common::socket::CancellableAccept(m_listenSocket.get(), m_bootTimeoutMs, m_vmExitEvent.get());
     THROW_HR_IF(E_ABORT, !socket.has_value());
 
     *Socket = reinterpret_cast<HANDLE>(socket->release());
@@ -504,7 +517,7 @@ try
         }
 
         m_networkEngine = std::make_unique<wsl::core::ConsommeNetworking>(
-            wsl::core::GnsChannel(std::move(gnsSocketHandle)), flags, nullptr, m_guestDeviceManager, m_userToken);
+            wsl::core::GnsChannel(std::move(gnsSocketHandle)), flags, nullptr, m_hostLoopback.c_str(), m_guestDeviceManager, m_userToken);
     }
     else
     {
@@ -530,7 +543,7 @@ try
     auto cleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&]() {
         if (disk.AccessGranted)
         {
-            hcs::RevokeVmAccess(m_vmIdString.c_str(), disk.Path.c_str());
+            hcs::RevokeVmAccess(m_vmIdString.c_str(), disk.Path.c_str(), m_userToken.get());
         }
 
         FreeLun(allocatedLun);
@@ -582,7 +595,7 @@ try
 
     if (it->second.AccessGranted)
     {
-        hcs::RevokeVmAccess(m_vmIdString.c_str(), it->second.Path.c_str());
+        hcs::RevokeVmAccess(m_vmIdString.c_str(), it->second.Path.c_str(), m_userToken.get());
     }
 
     m_attachedDisks.erase(it);
@@ -608,21 +621,25 @@ try
 
     if (!FeatureEnabled(WslcFeatureFlagsVirtioFs))
     {
+        auto runAsUser = wil::impersonate_token(m_userToken.get());
+        if (!m_plan9Server)
+        {
+            auto server =
+                wsl::windows::common::wslutil::CreateComServerAsUser<p9fs::Plan9FileSystem, IPlan9FileSystem>(m_userToken.get());
+            THROW_IF_FAILED(server->Init(&m_vmId, LX_INIT_UTILITY_VM_PLAN9_PORT));
+            THROW_IF_FAILED(server->Resume());
+            m_plan9Server = std::move(server);
+        }
+
         auto flags = hcs::Plan9ShareFlags::AllowOptions;
         WI_SetFlagIf(flags, hcs::Plan9ShareFlags::ReadOnly, ReadOnly);
-        hcs::AddPlan9Share(
-            m_computeSystem.get(),
-            shareName.c_str(),
-            shareName.c_str(),
-            WindowsPath,
-            LX_INIT_UTILITY_VM_PLAN9_PORT,
-            flags,
-            m_userToken.get());
+        THROW_IF_FAILED(m_plan9Server->AddSharePath(shareName.c_str(), WindowsPath, static_cast<UINT32>(flags)));
     }
     else
     {
-        std::wstring options = ReadOnly ? L"ro" : L"";
-
+        // N.B. The 'metadata' option is required so the virtiofs device host persists per-file
+        //      uid/gid in NTFS extended attributes. Without it, all files appear as root-owned.
+        std::wstring options = ReadOnly ? L"ro;metadata" : L"metadata";
         if (!m_virtioFsDevice.has_value())
         {
             VirtioFsShareOptions aggregateOptions{.Kind = VirtiofsShareKind_Aggregate};
@@ -651,8 +668,9 @@ try
 
     if (!it->second.has_value())
     {
+        auto runAsUser = wil::impersonate_token(m_userToken.get());
         auto shareName = wsl::shared::string::GuidToString<wchar_t>(it->first, wsl::shared::string::None);
-        hcs::RemovePlan9Share(m_computeSystem.get(), shareName.c_str(), LX_INIT_UTILITY_VM_PLAN9_PORT);
+        THROW_IF_FAILED(m_plan9Server->RemoveShare(shareName.c_str()));
     }
     else
     {
@@ -954,6 +972,7 @@ WSLCVirtualMachineFactory::WSLCVirtualMachineFactory(_In_ const WSLCSessionSetti
     m_bootTimeoutMs = Settings->BootTimeoutMs;
     m_networkingMode = Settings->NetworkingMode;
     m_featureFlags = Settings->FeatureFlags;
+    m_hostLoopback = Settings->HostLoopback ? Settings->HostLoopback : "";
     m_storageFlags = Settings->StorageFlags;
 }
 
@@ -968,6 +987,7 @@ WSLCSessionSettings WSLCVirtualMachineFactory::BuildSettings()
     settings.BootTimeoutMs = m_bootTimeoutMs;
     settings.NetworkingMode = m_networkingMode;
     settings.FeatureFlags = m_featureFlags;
+    settings.HostLoopback = m_hostLoopback.empty() ? nullptr : m_hostLoopback.c_str();
     settings.StorageFlags = m_storageFlags;
     settings.RootVhdOverride = m_rootVhdOverride ? m_rootVhdOverride->c_str() : nullptr;
     settings.RootVhdTypeOverride = m_rootVhdTypeOverride ? m_rootVhdTypeOverride->c_str() : nullptr;

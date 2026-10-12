@@ -9,14 +9,12 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS ${SOURCE_PATTERNS})
 # Object library for WSLC components.
 # Used to build the executable and also unit testing components.
 add_library(wslclib OBJECT ${SOURCES} ${HEADERS})
+
 target_include_directories(wslclib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${WSLC_SUBDIR_PATHS})
 
 target_link_libraries(wslclib
                       ${COMMON_LINK_LIBRARIES}
-                      yaml-cpp
-                      common
-                      advapi32
-                      crypt32)
+                      common)
 
 
 target_precompile_headers(wslclib REUSE_FROM common)

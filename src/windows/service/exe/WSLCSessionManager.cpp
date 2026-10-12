@@ -61,6 +61,7 @@ struct SessionSettings
 {
     std::wstring DisplayName;
     std::wstring StoragePath;
+    std::string HostLoopback;
     WSLCSessionSettings Settings{};
 
     NON_COPYABLE(SessionSettings);
@@ -111,10 +112,11 @@ struct SessionSettings
 
 private:
     SessionSettings(std::wstring name, std::wstring path, WSLCSessionStorageFlags storageFlags, const settings::UserSettings& userSettings) :
-        DisplayName(std::move(name)), StoragePath(std::move(path))
+        DisplayName(std::move(name)), StoragePath(std::move(path)), HostLoopback(userSettings.Get<settings::Setting::SessionHostLoopback>())
     {
         Settings.DisplayName = DisplayName.c_str();
         Settings.StoragePath = StoragePath.c_str();
+        Settings.HostLoopback = HostLoopback.empty() ? nullptr : HostLoopback.c_str();
         auto cpuCount = userSettings.Get<settings::Setting::SessionCpuCount>();
         Settings.CpuCount = cpuCount > 0 ? cpuCount : wsl::windows::common::wslutil::GetLogicalProcessorCount();
         auto memoryMb = userSettings.Get<settings::Setting::SessionMemoryMb>();
@@ -360,6 +362,12 @@ void WSLCSessionManagerImpl::CreateSession(
         TraceLoggingValue(creationResult, "Result"),
         TraceLoggingValue(tokenInfo.Elevated, "Elevated"),
         TraceLoggingValue(static_cast<uint32_t>(Flags), "Flags"),
+        TraceLoggingLevel(WINEVENT_LEVEL_INFO));
+
+    WSL_LOG(
+        "WSLCCreateSessionCaller",
+        TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage),
+        TraceLoggingKeyword(MICROSOFT_KEYWORD_CRITICAL_DATA),
         TraceLoggingValue(callerFileName.c_str(), "CallerFileName"),
         TraceLoggingLevel(WINEVENT_LEVEL_INFO));
 
@@ -583,8 +591,6 @@ try
         TraceLoggingValue(ClientVersion->Revision, "Revision"));
 
     // Moved to 2.9.5 in https://github.com/microsoft/WSL/pull/41199 to add OpenContainer to a compat interface.
-    // While we could have prevented moving this forward, as we are still in preview it should be acceptable to break.
-    // This also forces callers to experience the SDK support error early, hopefully leading to better support if a post-release support floor needs to be raised.
     constexpr std::tuple<uint32_t, uint32_t, uint32_t> c_minClientVersion{2, 9, 5};
 
     const std::tuple<uint32_t, uint32_t, uint32_t> clientVersion{ClientVersion->Major, ClientVersion->Minor, ClientVersion->Revision};

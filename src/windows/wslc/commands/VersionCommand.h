@@ -14,8 +14,14 @@ Abstract:
 #pragma once
 #include "Command.h"
 
+namespace wsl::windows::wslc::cli {
+struct Terminal;
+}
+
 namespace wsl::windows::wslc {
-struct Reporter;
+
+using namespace wsl::windows::wslc::cli;
+
 struct VersionCommand final : public Command
 {
     constexpr static std::wstring_view CommandName = L"version";
@@ -23,7 +29,7 @@ struct VersionCommand final : public Command
     {
     }
 
-    static void PrintVersion(Reporter& reporter);
+    static void PrintVersion(Terminal& terminal);
     std::vector<Argument> GetArguments() const override;
     std::wstring ShortDescription() const override;
     std::wstring LongDescription() const override;

@@ -130,12 +130,18 @@ WslVirtioNetConfig BuildVirtioNetConfig(
 } // namespace
 
 ConsommeNetworking::ConsommeNetworking(
-    GnsChannel&& gnsChannel, ConsommeNetworkingFlags flags, LPCWSTR dnsOptions, std::shared_ptr<GuestDeviceManager> guestDeviceManager, wil::shared_handle userToken) :
+    GnsChannel&& gnsChannel,
+    ConsommeNetworkingFlags flags,
+    LPCWSTR dnsOptions,
+    LPCSTR hostLoopback,
+    std::shared_ptr<GuestDeviceManager> guestDeviceManager,
+    wil::shared_handle userToken) :
     m_guestDeviceManager(std::move(guestDeviceManager)),
     m_userToken(std::move(userToken)),
     m_gnsChannel(std::move(gnsChannel)),
     m_flags(flags),
-    m_dnsOptions(dnsOptions)
+    m_dnsOptions(dnsOptions),
+    m_hostLoopback(hostLoopback ? hostLoopback : "")
 {
 }
 
@@ -156,6 +162,12 @@ void ConsommeNetworking::Initialize()
     if (WI_IsFlagSet(m_flags, ConsommeNetworkingFlags::LocalhostRelay))
     {
         SetupLoopbackDevice();
+    }
+
+    if (!m_hostLoopback.empty())
+    {
+        THROW_HR_IF(E_UNEXPECTED, !WI_IsFlagSet(m_flags, ConsommeNetworkingFlags::LocalhostRelay));
+        SetupHostLoopback();
     }
 
     THROW_IF_WIN32_ERROR(NotifyNetworkConnectivityHintChange(&ConsommeNetworking::OnNetworkConnectivityChange, this, TRUE, &m_networkNotifyHandle));
@@ -183,9 +195,30 @@ void ConsommeNetworking::StartPortTracker(wil::unique_socket&& socket)
     m_gnsPortTrackerChannel.emplace(
         std::move(socket),
         [&](const SOCKADDR_INET& addr, int protocol, bool allocate) {
-            return wil::ResultFromException([&]() {
+            const auto result = wil::ResultFromException([&]() {
                 HandlePortNotification(addr, protocol, INETADDR_PORT(reinterpret_cast<const SOCKADDR*>(&addr)), allocate);
             });
+
+            LOG_IF_FAILED_MSG(
+                result,
+                "Port mapping failed: address=%hs port=%u protocol=%d allocate=%d",
+                wsl::windows::common::string::SockAddrInetToString(addr).c_str(),
+                INETADDR_PORT(reinterpret_cast<const SOCKADDR*>(&addr)),
+                protocol,
+                allocate);
+
+            switch (result)
+            {
+            case S_OK:
+                return 0;
+
+            case HRESULT_FROM_WIN32(WSAEADDRINUSE):
+            case HRESULT_FROM_WIN32(WSAEACCES):
+                return -LX_EADDRINUSE;
+
+            default:
+                return -LX_EINVAL;
+            }
         },
         [](const std::string&, bool) {}); // TODO: reconsider if InterfaceStateCallback is needed.
 }
@@ -325,6 +358,35 @@ void ConsommeNetworking::RefreshGuestConnection()
 
     std::wstring default_route = networkSettings->GetBestGatewayAddressString();
 
+    // Generate a fallback gateway address if the host doesn't have a usable one.
+    // See: https://github.com/microsoft/WSL/issues/41740
+    if (default_route.empty() || default_route == LX_INIT_UNSPECIFIED_ADDRESS)
+    {
+        const auto gateway = GetFallbackIpv4Gateway(networkSettings->PreferredIpAddress);
+        if (gateway.si_family == AF_INET)
+        {
+            std::erase_if(
+                networkSettings->Routes, [](const auto& existing) { return existing.Family == AF_INET && existing.IsDefault(); });
+
+            const auto route = EndpointRoute::DefaultRoute(AF_INET, gateway);
+            networkSettings->Routes.emplace(route);
+            default_route = route.NextHopString;
+
+            WSL_LOG(
+                "ConsommeGeneratedIpv4Gateway",
+                TraceLoggingValue(networkSettings->PreferredIpAddress.AddressString.c_str(), "ClientIp"),
+                TraceLoggingValue(networkSettings->PreferredIpAddress.PrefixLength, "PrefixLength"),
+                TraceLoggingValue(default_route.c_str(), "GatewayIp"));
+        }
+        else
+        {
+            WSL_LOG(
+                "ConsommeIpv4GatewayUnavailable",
+                TraceLoggingValue(networkSettings->PreferredIpAddress.AddressString.c_str(), "ClientIp"),
+                TraceLoggingValue(networkSettings->PreferredIpAddress.PrefixLength, "PrefixLength"));
+        }
+    }
+
     networking::DnsInfo currentDns{};
     if (WI_IsFlagSet(m_flags, ConsommeNetworkingFlags::DnsTunneling))
     {
@@ -378,6 +440,34 @@ void ConsommeNetworking::RefreshGuestConnection()
     UpdateMtu(minMtu);
 
     m_networkSettings = std::move(networkSettings);
+}
+
+void ConsommeNetworking::SetupHostLoopback()
+{
+    const auto loopbackDevice = m_guestDeviceManager->GetVirtioNetDevice(c_loopbackDeviceName);
+
+    SOCKADDR_INET loopback{};
+    loopback.Ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    loopback.Ipv4.sin_family = AF_INET;
+    auto loopbackIp = ToIpAddress(loopback);
+
+    IpAddress virtualAddress;
+    THROW_IF_FAILED(loopbackDevice->CreateVirtualAddress(&loopbackIp, &virtualAddress));
+
+    uint32_t addressBytes{};
+    std::memcpy(&addressBytes, &virtualAddress.bytes[0], sizeof(addressBytes));
+
+    std::string virtualAddressString(INET_ADDRSTRLEN, '\0');
+    RtlIpv4AddressToStringA(reinterpret_cast<const IN_ADDR*>(&virtualAddress.bytes[0]), virtualAddressString.data());
+    virtualAddressString.resize(std::strlen(virtualAddressString.data()));
+
+    const auto eth0 = m_guestDeviceManager->GetVirtioNetDevice(c_eth0DeviceName);
+    THROW_IF_FAILED(eth0->CreateDNSRecord(DnsRecordType_A, m_hostLoopback.c_str(), virtualAddressString.c_str()));
+
+    WSL_LOG(
+        "SetupHostLoopback",
+        TraceLoggingValue(m_hostLoopback.c_str(), "DnsName"),
+        TraceLoggingValue(virtualAddressString.c_str(), "VirtualAddress"));
 }
 
 void ConsommeNetworking::SetupLoopbackDevice()

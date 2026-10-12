@@ -18,8 +18,10 @@ using namespace wsl::windows::wslc::execution;
 using namespace wsl::shared;
 
 namespace wsl::windows::wslc {
+
+using namespace wsl::windows::wslc::cli;
 // Network Root Command
-std::vector<std::unique_ptr<Command>> NetworkCommand::GetCommands() const
+std::vector<std::unique_ptr<Command>> NetworkCommand::CreateCommands() const
 {
     std::vector<std::unique_ptr<Command>> commands;
     commands.push_back(std::make_unique<NetworkCreateCommand>(FullName()));
@@ -49,6 +51,6 @@ std::wstring NetworkCommand::LongDescription() const
 
 void NetworkCommand::ExecuteInternal(CLIExecutionContext& context) const
 {
-    OutputHelp(context.Reporter);
+    OutputHelp(context.Terminal);
 }
 } // namespace wsl::windows::wslc

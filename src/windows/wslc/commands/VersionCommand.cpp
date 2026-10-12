@@ -13,7 +13,7 @@ Abstract:
 --*/
 
 #include "VersionCommand.h"
-#include "ArgumentValidation.h"
+#include "ArgumentConvertedTypes.h"
 #include "CLIExecutionContext.h"
 #include "JsonUtils.h"
 
@@ -23,6 +23,8 @@ using namespace wsl::windows::wslc::execution;
 using namespace wsl::windows::wslc::models;
 
 namespace wsl::windows::wslc {
+
+using namespace wsl::windows::wslc::cli;
 std::vector<Argument> VersionCommand::GetArguments() const
 {
     return {
@@ -40,14 +42,14 @@ std::wstring VersionCommand::LongDescription() const
     return Localization::WSLCCLI_VersionLongDesc();
 }
 
-void VersionCommand::PrintVersion(Reporter& reporter)
+void VersionCommand::PrintVersion(Terminal& terminal)
 {
-    reporter.Output(L"{} {}\n", s_ExecutableName, WSL_PACKAGE_VERSION);
+    terminal.Output(L"{} {}\n", s_ExecutableName, WSL_PACKAGE_VERSION);
 }
 
 void VersionCommand::ExecuteInternal(CLIExecutionContext& context) const
 {
-    FormatType format = validation::GetOutputFormat(context.Args);
+    const auto format = context.Args.GetValue<ArgType::Format>(FormatType::Table);
 
     switch (format)
     {
@@ -55,11 +57,11 @@ void VersionCommand::ExecuteInternal(CLIExecutionContext& context) const
     {
         nlohmann::json root;
         root["Client"]["Version"] = std::string{WSL_PACKAGE_VERSION};
-        context.Reporter.Output(L"{}\n", MultiByteToWide(root.dump(c_jsonCompactIndent)));
+        context.Terminal.Output(L"{}\n", MultiByteToWide(root.dump(c_jsonCompactIndent)));
         break;
     }
     case FormatType::Table:
-        PrintVersion(context.Reporter);
+        PrintVersion(context.Terminal);
         break;
     default:
         THROW_HR(E_UNEXPECTED);

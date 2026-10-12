@@ -15,14 +15,17 @@ Abstract:
 
 --*/
 
+#include "precomp.h"
 #include "WSLCVirtualMachine.h"
 #include <format>
 #include <filesystem>
+#include <nlohmann/json.hpp>
 #include "ServiceProcessLauncher.h"
 #include "wslutil.h"
 #include "lxinitshared.h"
 
 using namespace wsl::windows::common;
+using wsl::windows::common::io::HandleWrapper;
 using wsl::windows::service::wslc::TypedHandle;
 using wsl::windows::service::wslc::VmPortAllocation;
 using wsl::windows::service::wslc::VMPortMapping;
@@ -33,6 +36,53 @@ namespace wslutil = wsl::windows::common::wslutil;
 constexpr auto CONTAINER_PORT_RANGE = std::pair<uint16_t, uint16_t>(20002, 65535);
 
 static_assert(c_ephemeralPortRange.second < CONTAINER_PORT_RANGE.first);
+
+namespace {
+
+// Escapes regex metacharacters in `input` so a literal hostname can be embedded into a BuildKit
+// source-policy regex identifier (e.g. `myreg:5000` stays a literal match).
+std::string EscapeRegexMetacharacters(std::string_view input)
+{
+    static constexpr std::string_view c_metacharacters = R"(\.+*?()|[]{}^$)";
+    std::string escaped;
+    escaped.reserve(input.size());
+    for (const char ch : input)
+    {
+        if (c_metacharacters.find(ch) != std::string_view::npos)
+        {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(ch);
+    }
+    return escaped;
+}
+
+// DENY-all first, then per-host ALLOW: BuildKit evaluates rules in order and last match wins.
+// Hosts are lowercased because BuildKit normalises identifiers before regex matching.
+// https://github.com/moby/buildkit/blob/master/docs/sourcepolicy.md
+std::string BuildBuildKitSourcePolicyJson(const std::vector<std::string>& allowedHosts)
+{
+    nlohmann::json rules = nlohmann::json::array();
+    rules.push_back({{"action", "DENY"}, {"selector", {{"identifier", "docker-image://.*"}, {"match_type", "REGEX"}}}});
+
+    for (const auto& host : allowedHosts)
+    {
+        std::string lowered;
+        lowered.reserve(host.size());
+        std::transform(host.begin(), host.end(), std::back_inserter(lowered), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+
+        const auto identifier = "docker-image://" + EscapeRegexMetacharacters(lowered) + "/.*";
+        rules.push_back({{"action", "ALLOW"}, {"selector", {{"identifier", identifier}, {"match_type", "REGEX"}}}});
+    }
+
+    nlohmann::json document;
+    document["rules"] = std::move(rules);
+    return document.dump();
+}
+
+} // namespace
 
 VmPortAllocation::VmPortAllocation(uint16_t port, int family, int protocol, std::weak_ptr<VmPortReservations> reservations) :
     m_port(port), m_family(family), m_protocol(protocol), m_reservations(std::move(reservations))
@@ -315,7 +365,7 @@ void WSLCVirtualMachine::Initialize()
     Mount(m_initChannel, rootDevice.c_str(), "/mnt", m_rootVhdType.c_str(), "ro", WSLC_MOUNT::Chroot | WSLC_MOUNT::OverlayFs);
 
     const auto modulesDevice = GetVhdDevicePath(1);
-    Mount(m_initChannel, modulesDevice.c_str(), "", "ext4", "ro", WSLC_MOUNT::KernelModules);
+    MountModules(m_initChannel, modulesDevice.c_str());
 
     // Discover the per-VM guest capabilities (currently the hv_pci swiotlb pool) and forward them
     // to the service before virtiofs shares or Consomme networking devices are created.
@@ -323,6 +373,11 @@ void WSLCVirtualMachine::Initialize()
 
     // Configure GPU mounts if enabled
     MountGpuLibraries(c_gpuLibrariesPath, c_gpuDriversPath);
+
+    // Snapshot the container-registry allowlist and, if configured, hand the BuildKit source-policy
+    // JSON to init. Done at boot rather than per build so a compromised user process cannot bypass
+    // enforcement by racing the write.
+    ConfigureBuildKitPolicy();
 
     // Configure networking. This must happen after all filesystems are mounted since /gns needs to access /sys.
     ConfigureNetworking();
@@ -409,15 +464,15 @@ void WSLCVirtualMachine::ConfigureNetworking()
     // Call back to the service to configure the networking engine.
     auto gnsHandle = process->GetStdHandle(gnsChannelFd);
 
-    wil::unique_handle dnsHandle;
+    HandleWrapper dnsHandle;
     HANDLE dnsSocketHandle = nullptr;
     if (enableDnsTunneling)
     {
         dnsHandle = process->GetStdHandle(dnsChannelFd);
-        dnsSocketHandle = dnsHandle.get();
+        dnsSocketHandle = dnsHandle.Get();
     }
 
-    THROW_IF_FAILED(m_vm->ConfigureNetworking(gnsHandle.get(), enableDnsTunneling ? &dnsSocketHandle : nullptr));
+    THROW_IF_FAILED(m_vm->ConfigureNetworking(gnsHandle.Get(), enableDnsTunneling ? &dnsSocketHandle : nullptr));
 
     // Launch port relay for port forwarding
     LaunchPortRelay();
@@ -442,6 +497,46 @@ void WSLCVirtualMachine::ReadGuestCapabilities()
     capabilities.HvPciSwiotlbBase = m_hvPciSwiotlbBase;
     capabilities.HvPciSwiotlbSize = m_hvPciSwiotlbSize;
     THROW_IF_FAILED(m_vm->ApplyGuestCapabilities(&capabilities));
+}
+
+void WSLCVirtualMachine::ConfigureBuildKitPolicy()
+{
+    const auto snapshot = wsl::windows::policies::ReadRegistryAllowlistSnapshotFromPoliciesRoot();
+
+    if (snapshot.State == wsl::windows::policies::RegistryAllowlistState::NotConfigured)
+    {
+        m_buildKitPolicyState = BuildKitPolicyState::NotConfigured;
+        return;
+    }
+
+    std::vector<std::string> hosts;
+    hosts.reserve(snapshot.Hosts.size());
+    std::ranges::transform(snapshot.Hosts, std::back_inserter(hosts), [](const std::wstring& host) {
+        return wsl::shared::string::WideToMultiByte(host);
+    });
+
+    const auto policyJson = BuildBuildKitSourcePolicyJson(hosts);
+
+    // Linux <fcntl.h> flags for open().
+    constexpr int c_lxOWriteOnly = 0x1;
+    constexpr int c_lxOCreate = 0x40;
+    constexpr int c_lxOTruncate = 0x200;
+    constexpr int c_lxOCloseOnExec = 0x80000;
+    constexpr int c_lxONoFollow = 0x20000;
+
+    auto message = wsl::shared::MessageWriter<WSLC_WRITE_FILE>{};
+    message.WriteString(message->PathIndex, c_buildKitPolicyPath);
+    message->ContentLength = static_cast<unsigned int>(policyJson.size());
+    gsl::copy(
+        gsl::as_bytes(gsl::make_span(policyJson.data(), policyJson.size())),
+        message.InsertBuffer(message->ContentIndex, policyJson.size()));
+    message->OpenFlags = c_lxOWriteOnly | c_lxOCreate | c_lxOTruncate | c_lxOCloseOnExec | c_lxONoFollow;
+    message->Permissions = 0644;
+
+    const auto& response = m_initChannel.Transaction<WSLC_WRITE_FILE>(message.Span(), nullptr, m_initChannelTimeout);
+    THROW_HR_IF_MSG(E_FAIL, response.Result != 0, "Guest failed to write %hs: %d", c_buildKitPolicyPath, response.Result);
+
+    m_buildKitPolicyState = BuildKitPolicyState::Configured;
 }
 
 bool WSLCVirtualMachine::FeatureEnabled(WSLCFeatureFlags Value) const
@@ -687,10 +782,11 @@ std::string WSLCVirtualMachine::GetVhdDevicePath(ULONG Lun)
     message.Header.MessageSize = sizeof(message);
     message.Header.MessageType = WSLC_GET_DISK::Type;
     message.ScsiLun = Lun;
-    const auto& response = m_initChannel.Transaction(message, nullptr, m_initChannelTimeout);
+    gsl::span<gsl::byte> responseSpan;
+    const auto& response = m_initChannel.Transaction(message, &responseSpan, m_initChannelTimeout);
     THROW_HR_IF_MSG(E_FAIL, response.Result != 0, "Failed to get disk path, init returned: %lu", response.Result);
 
-    return response.Buffer;
+    return std::string{wsl::shared::string::FromMessageBuffer<WSLC_GET_DISK_RESULT>(responseSpan)};
 }
 
 Microsoft::WRL::ComPtr<WSLCProcess> WSLCVirtualMachine::CreateLinuxProcess(
@@ -835,7 +931,7 @@ Microsoft::WRL::ComPtr<WSLCProcess> WSLCVirtualMachine::CreateLinuxProcessImpl(
     std::map<ULONG, TypedHandle> stdHandles;
     for (auto& [fd, handle] : sockets)
     {
-        stdHandles.emplace(fd, TypedHandle{wil::unique_handle{reinterpret_cast<HANDLE>(handle.release())}, WSLCHandleTypeSocket});
+        stdHandles.emplace(fd, TypedHandle{std::move(handle), WSLCHandleTypeSocket});
     }
 
     auto io = std::make_unique<VMProcessIO>(std::move(stdHandles));
@@ -886,6 +982,18 @@ void WSLCVirtualMachine::Mount(shared::SocketChannel& Channel, LPCSTR Source, LP
         TraceLoggingValue(Options == nullptr ? "<null>" : Options, "Options"),
         TraceLoggingValue(Flags, "Flags"),
         TraceLoggingValue(response.Result, "Result"));
+
+    THROW_HR_IF(E_FAIL, response.Result != 0);
+}
+
+void WSLCVirtualMachine::MountModules(shared::SocketChannel& Channel, LPCSTR Source)
+{
+    wsl::shared::MessageWriter<WSLC_MOUNT_MODULES> message;
+    message.WriteString(message->SourceIndex, Source);
+
+    const auto& response = Channel.Transaction<WSLC_MOUNT_MODULES>(message.Span());
+
+    WSL_LOG("WSLCMountModules", TraceLoggingValue(Source, "Source"), TraceLoggingValue(response.Result, "Result"));
 
     THROW_HR_IF(E_FAIL, response.Result != 0);
 }
@@ -1001,7 +1109,7 @@ void WSLCVirtualMachine::MapRelayPort(_In_ int Family, _In_ unsigned short Windo
 
     DWORD bytesTransfered{};
     THROW_IF_WIN32_BOOL_FALSE(WriteFile(m_portRelayChannelWrite.get(), &message, sizeof(message), &bytesTransfered, nullptr));
-    THROW_HR_IF_MSG(E_UNEXPECTED, bytesTransfered != sizeof(message), "%u bytes transfered", bytesTransfered);
+    THROW_HR_IF_MSG(E_UNEXPECTED, bytesTransfered != sizeof(message), "%u bytes transferred", bytesTransfered);
 
     HRESULT result = E_UNEXPECTED;
     THROW_IF_WIN32_BOOL_FALSE(ReadFile(m_portRelayChannelRead.get(), &result, sizeof(result), &bytesTransfered, nullptr));
@@ -1327,7 +1435,7 @@ void WSLCVirtualMachine::CollectCrashDumps(wil::unique_socket&& listenSocket)
     {
         try
         {
-            auto socket = socket::CancellableAccept(listenSocket.get(), INFINITE, m_vmTerminatingEvent.get());
+            auto socket = wsl::windows::common::socket::CancellableAccept(listenSocket.get(), INFINITE, m_vmTerminatingEvent.get());
             if (!socket)
             {
                 // VM is exiting.

@@ -15,16 +15,19 @@ Abstract:
 
 #include "SessionModel.h"
 #include "NetworkModel.h"
-#include "Reporter.h"
+#include "Terminal.h"
 #include <wslc.h>
 #include <wslc_schema.h>
 
 namespace wsl::windows::wslc::services {
+
+using namespace wsl::windows::wslc::cli;
 struct NetworkService
 {
-    static void Create(Reporter& reporter, models::Session& session, const models::CreateNetworkOptions& createOptions);
+    static void Create(Terminal& terminal, models::Session& session, const models::CreateNetworkOptions& createOptions);
     static void Delete(models::Session& session, const std::string& name);
-    static std::vector<WSLCNetworkInformation> List(models::Session& session);
+    static std::vector<wsl::windows::common::wslc_schema::NetworkListEntry> List(
+        models::Session& session, const std::vector<std::pair<std::string, std::string>>& filters = {});
     static wsl::windows::common::wslc_schema::Network Inspect(models::Session& session, const std::string& name);
     static models::PruneNetworksResult Prune(models::Session& session, const std::vector<std::pair<std::string, std::string>>& filters = {});
     static void Connect(models::Session& session, const models::ConnectNetworkOptions& connectOptions);
