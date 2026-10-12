@@ -1928,16 +1928,15 @@ Return Value:
 
 try
 {
-    int SocketSize = BufferSize.value_or(LX_INIT_UTILITY_VM_PLAN9_BUFFER_SIZE);
-    int Msize = BufferSize.value_or(LX_INIT_UTILITY_VM_PLAN9_MSIZE_FD);
-    wil::unique_fd Fd{UtilConnectVsock(LX_INIT_UTILITY_VM_PLAN9_PORT, true, SocketSize)};
+    int Size = BufferSize.value_or(LX_INIT_UTILITY_VM_PLAN9_BUFFER_SIZE);
+    wil::unique_fd Fd{UtilConnectVsock(LX_INIT_UTILITY_VM_PLAN9_PORT, true, Size)};
     if (!Fd)
     {
         return -1;
     }
 
     unsigned long Flags = MS_NOATIME | MS_NOSUID | MS_NODEV;
-    auto Options = std::format("msize={},trans=fd,rfdno={},wfdno={},cache=mmap,aname={}", Msize, Fd.get(), Fd.get(), Name);
+    auto Options = std::format("msize={},trans=fd,rfdno={},wfdno={},cache=mmap,aname={}", Size, Fd.get(), Fd.get(), Name);
     if (ReadOnly)
     {
         WI_SetFlag(Flags, MS_RDONLY);
