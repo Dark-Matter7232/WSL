@@ -1025,6 +1025,9 @@
   <data name="MessageWSLContainerDisabled" xml:space="preserve">
     <value>Команда wsl.exe --mount отключена политикой компьютера.</value>
   </data>
+  <data name="MessageWslcCapabilityAdditionsDisabled" xml:space="preserve">
+    <value>Добавление возможностей Linux отключено политикой компьютера.</value>
+  </data>
   <data name="MessageRegistryBlockedByPolicy" xml:space="preserve">
     <value>Реестр образов контейнера "{}" заблокирован политикой компьютера.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
@@ -2221,6 +2224,10 @@
     <value>Контейнер "{}" запущен и не может быть удален. Остановите контейнер перед удалением или используйте принудительное удаление (-f).</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
+  <data name="MessageWslcCannotRemoveRestartingContainer" xml:space="preserve">
+    <value>Контейнер '{}' перезапускается и не может быть удален. Остановите контейнер перед удалением или используйте принудительное удаление (-f).</value>
+    <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
   <data name="MessageWslcContainerNotRunning" xml:space="preserve">
     <value>Контейнер "{}" не запущен.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
@@ -2535,6 +2542,10 @@
   </data>
   <data name="MessageWslcInvalidStopTimeout" xml:space="preserve">
     <value>Недопустимое значение времени остановки: {}</value>
+    <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="MessageWslcInvalidSignal" xml:space="preserve">
+    <value>Invalid signal value: {}</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
   <data name="MessageWslcNetworkModeNoAdditionalNetworks" xml:space="preserve">
@@ -3654,6 +3665,12 @@
   <data name="WSLCCLI_VirtualArgDescription" xml:space="preserve">
     <value>Предоставить контейнеру возможности виртуализации</value>
   </data>
+  <data name="WSLCCLI_CapAddArgDescription" xml:space="preserve">
+    <value>Добавить возможности Linux (можно использовать несколько раз)</value>
+  </data>
+  <data name="WSLCCLI_CapDropArgDescription" xml:space="preserve">
+    <value>Удалить возможности Linux (можно использовать несколько раз)</value>
+  </data>
   <data name="WSLCCLI_ContainerExecForwardArgsDescription" xml:space="preserve">
     <value>Аргументы для передачи команде, выполняемой внутри контейнера</value>
   </data>
@@ -3671,6 +3688,10 @@
   <data name="WSLCCLI_InvalidRestartPolicyError" xml:space="preserve">
     <value>Недопустимое значение {} "{}". Ожидается no, always, on-failure[:max-retries] или unless-stopped.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="WSLCCLI_UnsupportedRestartPolicyError" xml:space="preserve">
+    <value>Restart policy '{}' is not supported. Supported values are no and always.</value>
+    <comment>{Locked="no"}{Locked="always"}{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
   <data name="WSLCCLI_InvalidProgressTypeError" xml:space="preserve">
     <value>Недопустимое значение {}: {} не является распознаваемым типом хода выполнения. Поддерживаемые типы хода выполнения: {}.</value>
@@ -4141,6 +4162,9 @@
   <data name="MessageWslcContainerStopAfterPluginRejectionFailed" xml:space="preserve">
     <value>Не удалось остановить контейнер '{}' после отклонения подключаемого модуля</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="MessageWslcRestartPolicyConflictsWithRm" xml:space="preserve">
+    <value>A restart policy cannot be combined with automatic removal of the container.</value>
   </data>
   <data name="MessageWslcVolumeReleaseFailed" xml:space="preserve">
     <value>Не удалось освободить ресурсы узла для тома "{}"</value>

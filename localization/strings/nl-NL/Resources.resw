@@ -1018,6 +1018,9 @@ Terugvallen op NAT-netwerken.</value>
   <data name="MessageWSLContainerDisabled" xml:space="preserve">
     <value>WSL-container is uitgeschakeld door het computerbeleid.</value>
   </data>
+  <data name="MessageWslcCapabilityAdditionsDisabled" xml:space="preserve">
+    <value>Toevoegingen van Linux-mogelijkheden zijn uitgeschakeld door het computerbeleid.</value>
+  </data>
   <data name="MessageRegistryBlockedByPolicy" xml:space="preserve">
     <value>Het containerinstallatiekopieregister {} wordt geblokkeerd door het computerbeleid.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
@@ -2214,6 +2217,10 @@ Gebruik:
     <value>De container {} is actief en kan niet worden verwijderd. Stop de container voordat u deze verwijdert of gebruik geforceerd verwijderen (-f).</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
+  <data name="MessageWslcCannotRemoveRestartingContainer" xml:space="preserve">
+    <value>De container {} wordt opnieuw opgestart en kan niet worden verwijderd. Stop de container voordat u deze verwijdert of gebruik geforceerd verwijderen (-f).</value>
+    <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
   <data name="MessageWslcContainerNotRunning" xml:space="preserve">
     <value>Container {} is niet actief.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
@@ -2528,6 +2535,10 @@ Ga naar https://aka.ms/privacy voor privacyinformatie over dit product.</value>
   </data>
   <data name="MessageWslcInvalidStopTimeout" xml:space="preserve">
     <value>Ongeldige time-outwaarde voor stoppen: {}</value>
+    <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="MessageWslcInvalidSignal" xml:space="preserve">
+    <value>Invalid signal value: {}</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
   <data name="MessageWslcNetworkModeNoAdditionalNetworks" xml:space="preserve">
@@ -3647,6 +3658,12 @@ Bij de eerste uitvoering wordt het bestand aangemaakt met alle instellingen geco
   <data name="WSLCCLI_VirtualArgDescription" xml:space="preserve">
     <value>Virtualisatiemogelijkheden zichtbaar maken voor de container</value>
   </data>
+  <data name="WSLCCLI_CapAddArgDescription" xml:space="preserve">
+    <value>Linux-mogelijkheden toevoegen (herhaalbaar)</value>
+  </data>
+  <data name="WSLCCLI_CapDropArgDescription" xml:space="preserve">
+    <value>Linux-mogelijkheden verwijderen (herhaalbaar)</value>
+  </data>
   <data name="WSLCCLI_ContainerExecForwardArgsDescription" xml:space="preserve">
     <value>Argumenten om door te geven aan de opdracht die binnen de container wordt uitgevoerd</value>
   </data>
@@ -3664,6 +3681,10 @@ Bij de eerste uitvoering wordt het bestand aangemaakt met alle instellingen geco
   <data name="WSLCCLI_InvalidRestartPolicyError" xml:space="preserve">
     <value>{} waarde {} is ongeldig. Verwacht nee, altijd, on-failure[:max-retries] of unless-stopped.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="WSLCCLI_UnsupportedRestartPolicyError" xml:space="preserve">
+    <value>Het beleid {} voor opnieuw opstarten wordt noniet ondersteund. Ondersteunde waarden zijn no en always.</value>
+    <comment>{Locked="no"}{Locked="always"}{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
   <data name="WSLCCLI_InvalidProgressTypeError" xml:space="preserve">
     <value>Ongeldige {}-waarde: {} is geen herkend voortgangstype. Ondersteunde voortgangstypen zijn: {}.</value>
@@ -4134,6 +4155,9 @@ Bij de eerste uitvoering wordt het bestand aangemaakt met alle instellingen geco
   <data name="MessageWslcContainerStopAfterPluginRejectionFailed" xml:space="preserve">
     <value>Kan de container '{}' niet stoppen na afwijzing van de invoegtoepassing</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="MessageWslcRestartPolicyConflictsWithRm" xml:space="preserve">
+    <value>Een beleid voor opnieuw opstarten kan niet worden gecombineerd met het automatisch verwijderen van de container.</value>
   </data>
   <data name="MessageWslcVolumeReleaseFailed" xml:space="preserve">
     <value>Kan de hostresources voor volume '{}' niet vrijgeven</value>

@@ -1018,6 +1018,9 @@ A reverter para a rede NAT.</value>
   <data name="MessageWSLContainerDisabled" xml:space="preserve">
     <value>O contentor WSL está desativado pela política do computador.</value>
   </data>
+  <data name="MessageWslcCapabilityAdditionsDisabled" xml:space="preserve">
+    <value>As adições de capacidade do Linux são desativadas pela política do computador.</value>
+  </data>
   <data name="MessageRegistryBlockedByPolicy" xml:space="preserve">
     <value>O registo da imagem do contentor "{}" está bloqueado pela política do computador.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
@@ -2214,6 +2217,10 @@ Utilização:
     <value>O contentor "{}" está em execução e não pode ser removido. Pare o contentor antes de o remover ou utilize a remoção forçada (-f).</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
+  <data name="MessageWslcCannotRemoveRestartingContainer" xml:space="preserve">
+    <value>Container '{}' is restarting and cannot be removed. Either stop the container before removing or use forced remove (-f).</value>
+    <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
   <data name="MessageWslcContainerNotRunning" xml:space="preserve">
     <value>O contentor "{}" não está em execução.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
@@ -2528,6 +2535,10 @@ Para obter informações de privacidade sobre este produto, visite https://aka.m
   </data>
   <data name="MessageWslcInvalidStopTimeout" xml:space="preserve">
     <value>Valor inválido do tempo limite de paragem: {}</value>
+    <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="MessageWslcInvalidSignal" xml:space="preserve">
+    <value>Invalid signal value: {}</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
   <data name="MessageWslcNetworkModeNoAdditionalNetworks" xml:space="preserve">
@@ -3647,6 +3658,12 @@ Na primeira execução, cria o ficheiro com todas as definições comentadas nas
   <data name="WSLCCLI_VirtualArgDescription" xml:space="preserve">
     <value>Expor capacidades de virtualização ao contentor</value>
   </data>
+  <data name="WSLCCLI_CapAddArgDescription" xml:space="preserve">
+    <value>Adicionar capacidades do Linux (repetível)</value>
+  </data>
+  <data name="WSLCCLI_CapDropArgDescription" xml:space="preserve">
+    <value>Remover capacidades do Linux (repetível)</value>
+  </data>
   <data name="WSLCCLI_ContainerExecForwardArgsDescription" xml:space="preserve">
     <value>Argumentos para passar para o comando que está a ser executado dentro do contentor</value>
   </data>
@@ -3664,6 +3681,10 @@ Na primeira execução, cria o ficheiro com todas as definições comentadas nas
   <data name="WSLCCLI_InvalidRestartPolicyError" xml:space="preserve">
     <value>Valor {} inválido '{}'. Era esperado que não, sempre, em falha[:max-retries] ou a menos que parassem.</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="WSLCCLI_UnsupportedRestartPolicyError" xml:space="preserve">
+    <value>Restart policy '{}' is not supported. Supported values are no and always.</value>
+    <comment>{Locked="no"}{Locked="always"}{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
   </data>
   <data name="WSLCCLI_InvalidProgressTypeError" xml:space="preserve">
     <value>Valor de {} inválido: {} não é um tipo de progresso reconhecido. Os tipos de progresso suportados são: {}.</value>
@@ -4134,6 +4155,9 @@ Na primeira execução, cria o ficheiro com todas as definições comentadas nas
   <data name="MessageWslcContainerStopAfterPluginRejectionFailed" xml:space="preserve">
     <value>Falha ao parar o contentor "{}" após a rejeição do plug-in</value>
     <comment>{FixedPlaceholder="{}"}Command line arguments, file names and string inserts should not be translated</comment>
+  </data>
+  <data name="MessageWslcRestartPolicyConflictsWithRm" xml:space="preserve">
+    <value>A restart policy cannot be combined with automatic removal of the container.</value>
   </data>
   <data name="MessageWslcVolumeReleaseFailed" xml:space="preserve">
     <value>Falha ao libertar recursos de anfitrião para o volume "{}"</value>
