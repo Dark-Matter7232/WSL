@@ -46,7 +46,9 @@ enum class PluginTestType
     WslcVmStopCommitted,
     WslcVmNeverStarted,
     MountFolderAccess,
-    WslcVmExitDuringSessionRelease
+    CgroupIsolation,
+    WslcVmExitDuringSessionRelease,
+    WslcContainerStoppingDuringTerminate
 };
 
 constexpr auto c_testType = L"TestType";
@@ -54,6 +56,7 @@ constexpr auto c_logFile = L"LogFile";
 constexpr auto c_mountFolder = L"MountFolder";
 constexpr auto c_vmStoppingEnteredEvent = L"Global\\WslcVmExitDuringSessionRelease-entered";
 constexpr auto c_vmStoppingReleaseEvent = L"Global\\WslcVmExitDuringSessionRelease-release";
+constexpr auto c_containerStoppingEnteredEvent = L"Global\\WslcContainerStoppingDuringTerminate-entered";
 
 inline wil::unique_hkey OpenTestRegistryKey(REGSAM AccessMask)
 {

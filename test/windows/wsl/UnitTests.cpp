@@ -37,6 +37,7 @@ Abstract:
 #include "CommandLine.h"
 #include "retryshared.h"
 #include "RingBuffer.h"
+#include "socket.hpp"
 
 #define LXSST_TEST_USERNAME L"kerneltest"
 
@@ -5790,13 +5791,13 @@ VERSION_ID="Invalid|Format"
                 DistroFileChange distributionconf(L"/etc/wsl-distribution.conf", false);
                 distributionconf.SetContent(Manifest);
                 WslShutdown();
-                VERIFY_ARE_EQUAL(LxsstuLaunchWsl(std::format(L"--export test_distro {} --format vhd", VhdName)), 0L);
+                VERIFY_ARE_EQUAL(LxsstuLaunchWsl(std::format(L"--export test_distro \"{}\" --format vhd", VhdName)), 0L);
             };
 
             auto InstallFromVhd =
                 [](LPCWSTR DistroName, LPCWSTR VhdName, int ExpectedExitCode = 0, LPCWSTR ExpectedOutput = nullptr, LPCWSTR ExpectedWarnings = nullptr) {
                     auto [out, err] =
-                        LxsstuLaunchWslAndCaptureOutput(std::format(L"--import-in-place {} {}", DistroName, VhdName), ExpectedExitCode);
+                        LxsstuLaunchWslAndCaptureOutput(std::format(L"--import-in-place {} \"{}\"", DistroName, VhdName), ExpectedExitCode);
 
                     if (ExpectedOutput != nullptr)
                     {
@@ -5809,16 +5810,27 @@ VERSION_ID="Invalid|Format"
                     }
                 };
 
+            const auto importDirectory = std::filesystem::current_path() / L"wsl-import-in-place";
+            VERIFY_IS_TRUE(std::filesystem::create_directory(importDirectory));
+            auto cleanupDirectory =
+                wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&]() { std::filesystem::remove_all(importDirectory); });
+
+            const auto siblingDirectories = {importDirectory / LXSS_ROOTFS_DIRECTORY, importDirectory / LXSS_TEMP_DIRECTORY};
+            for (const auto& directory : siblingDirectories)
+            {
+                VERIFY_IS_TRUE(std::filesystem::create_directory(directory));
+            }
+
             const auto distroName = L"distro-import-in-place";
-            const auto vhdName = L"distro-import-in-place.vhdx";
+            const auto vhdPath = importDirectory / L"distro-import-in-place.vhdx";
             auto cleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&]() {
                 LxsstuLaunchWsl(std::format(L"--unregister {}", distroName).c_str());
-                DeleteFileW(vhdName);
+                DeleteFileW(vhdPath.c_str());
             });
 
-            CreateVhdFromManifest(L"", vhdName);
+            CreateVhdFromManifest(L"", vhdPath.c_str());
 
-            InstallFromVhd(distroName, vhdName);
+            InstallFromVhd(distroName, vhdPath.c_str());
             ValidateDistributionStarts(distroName);
 
             // Validate that the distribution was installed under the right name
@@ -5834,7 +5846,14 @@ VERSION_ID="Invalid|Format"
             auto [json, profile_path] = ValidateDistributionTerminalProfile(distroName, true);
 
             VERIFY_IS_TRUE(std::filesystem::exists(profile_path));
-            cleanup.reset();
+            VERIFY_ARE_EQUAL(0L, LxsstuLaunchWsl(std::format(L"--unregister {}", distroName)));
+            cleanup.release();
+
+            VERIFY_IS_FALSE(std::filesystem::exists(vhdPath));
+            for (const auto& directory : siblingDirectories)
+            {
+                VERIFY_IS_TRUE(std::filesystem::is_directory(directory));
+            }
 
             // Terminal profile should be removed when the distribution is unregistered.
             VERIFY_IS_FALSE(std::filesystem::exists(profile_path));
@@ -7193,21 +7212,24 @@ Distribution successfully installed. It can be launched via 'wsl.exe -d ubuntu-d
             VERIFY_ARE_EQUAL(e, L"");
         }
 
+        for (const auto* firstValue : {L"--flag", L"-f", L"--", L"-", L"value"})
         {
-            ArgumentParser parser(L"--a b -- --c", entryPoint, 0);
-            std::wstring a;
-            std::wstring c;
-            std::wstring e;
-            std::wstring pos;
-            parser.AddArgument(a, L"--a");
-            parser.AddArgument(e, L"--e");
-            parser.AddPositionalArgument(pos, 0);
+            ArgumentParser parser(std::format(L"--option value -- {} next-value", firstValue), entryPoint, 0);
+            std::wstring option;
+            bool flag{};
+            std::wstring first;
+            std::wstring second;
+            parser.AddArgument(option, L"--option");
+            parser.AddArgument(flag, L"--flag", 'f');
+            parser.AddPositionalArgument(first, 0);
+            parser.AddPositionalArgument(second, 1);
 
             parse(parser);
 
-            VERIFY_ARE_EQUAL(a, L"b");
-            VERIFY_ARE_EQUAL(pos, L"--c");
-            VERIFY_ARE_EQUAL(e, L"");
+            VERIFY_ARE_EQUAL(option, L"value");
+            VERIFY_IS_FALSE(flag);
+            VERIFY_ARE_EQUAL(first, firstValue);
+            VERIFY_ARE_EQUAL(second, L"next-value");
         }
 
         {
@@ -7341,16 +7363,19 @@ Distribution successfully installed. It can be launched via 'wsl.exe -d ubuntu-d
         }
 
         {
-            ArgumentParser parser(L"--foo -", entryPoint, 0);
+            ArgumentParser parser(L"--foo - next-value", entryPoint, 0);
             bool a{};
             std::wstring pos;
+            std::wstring nextPos;
 
             parser.AddArgument(a, L"--foo");
             parser.AddPositionalArgument(pos, 0);
+            parser.AddPositionalArgument(nextPos, 1);
 
             parse(parser);
             VERIFY_IS_TRUE(a);
             VERIFY_ARE_EQUAL(pos, L"-");
+            VERIFY_ARE_EQUAL(nextPos, L"next-value");
         }
     }
 
@@ -7845,6 +7870,30 @@ Distribution successfully installed. It can be launched via 'wsl.exe -d ubuntu-d
         VERIFY_ARE_EQUAL(err, L"");
     }
 
+    WSL2_TEST_METHOD(CustomKernelModulesVhdx)
+    {
+#ifdef WSL_DEV_INSTALL_PATH
+        const std::filesystem::path toolsPath{WSL_DEV_INSTALL_PATH};
+#else
+        const auto toolsPath = GetInstalledWslToolsPath();
+#endif
+        GUID id{};
+        THROW_IF_FAILED(CoCreateGuid(&id));
+        const auto directory =
+            std::filesystem::temp_directory_path() /
+            (L"wsl-test-boot-vhdx-" + wsl::shared::string::GuidToString<wchar_t>(id, wsl::shared::string::GuidToStringFlags::None));
+        auto cleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&] { std::filesystem::remove_all(directory); });
+        std::filesystem::create_directories(directory);
+
+        const auto modulesPath = directory / L"modules.vhdx";
+        LxsstuLaunchPowershellAndCaptureOutput(std::format(
+            L"Convert-VHD -Path '{}' -DestinationPath '{}' -VHDType Dynamic", (toolsPath / L"artifacts.vhd").native(), modulesPath.native()));
+        VERIFY_IS_TRUE(std::filesystem::exists(modulesPath));
+
+        WslConfigChange config{LxssGenerateTestConfig({.kernel = (toolsPath / L"kernel").native(), .kernelModules = modulesPath.native()})};
+        ValidateOutput(L"test -s /lib/modules/$(uname -r)/modules.dep && echo OK", L"OK\n", L"", 0);
+    }
+
     WSL2_TEST_METHOD(CustomVhdsAccessibleViaInheritedAcls)
     {
         // Regression: VHDs reachable to VMWP via inherited ACLs must boot even when the
@@ -8011,6 +8060,46 @@ Distribution successfully installed. It can be launched via 'wsl.exe -d ubuntu-d
             VERIFY_IS_FALSE(std::filesystem::exists(vhdPath));
             VERIFY_IS_FALSE(GetDistributionId(distroName).has_value());
             cleanup.release();
+        }
+    }
+
+    TEST_METHOD(InvalidDistroRegistrationName)
+    {
+        const auto distroId = GetDistributionId(LXSS_DISTRO_NAME_TEST_L);
+        VERIFY_IS_TRUE(distroId.has_value());
+
+        const auto distroKey = OpenDistributionKey(LXSS_DISTRO_NAME_TEST_L);
+
+        RegistryKeyChange<std::wstring> nameChange(distroKey.get(), L"", L"DistributionName", LXSS_DISTRO_NAME_TEST_L);
+
+        wsl::windows::common::SvcComm service;
+        const auto originalDistributions = service.EnumerateDistributions();
+
+        for (const size_t length : {size_t{LX_INIT_DISTRO_NAME_MAX}, size_t{LX_INIT_DISTRO_NAME_MAX + 1}, size_t{4096}})
+        {
+            const std::wstring name(length, L'a');
+            nameChange.Set(name);
+
+            const auto distributions = service.EnumerateDistributions();
+            const bool validName = length <= LX_INIT_DISTRO_NAME_MAX;
+
+            VERIFY_ARE_EQUAL(originalDistributions.size() - (validName ? 0 : 1), distributions.size());
+
+            auto [output, error] = LxsstuLaunchWslAndCaptureOutput(L"--list --quiet");
+            if (validName)
+            {
+                VERIFY_IS_TRUE(output.find(name + L"\r\n") != std::wstring::npos);
+                VERIFY_ARE_EQUAL(error, L"");
+            }
+            else
+            {
+                VERIFY_IS_TRUE(output.find(name) == std::wstring::npos);
+                VERIFY_ARE_EQUAL(
+                    error,
+                    std::format(
+                        L"wsl: Found invalid distribution registration '{}', E_INVALIDARG.\r\n",
+                        wsl::shared::string::GuidToString<wchar_t>(distroId.value())));
+            }
         }
     }
 
@@ -9301,6 +9390,80 @@ Distribution successfully installed. It can be launched via 'wsl.exe -d ubuntu-d
         overwrittenBuffer.Insert("\nalpha\nbeta\n");
         VERIFY_ARE_EQUAL(std::string("pha\nbeta\n"), overwrittenBuffer.Get());
         verifyLines(overwrittenBuffer, 3, {"pha", "beta"});
+    }
+
+    TEST_METHOD(ListRunningDistributions)
+    {
+        constexpr auto c_stoppedDistroName = L"list-running-stopped";
+        VERIFY_ARE_EQUAL(
+            LxsstuLaunchWsl(std::format(L"--import {} . \"{}\" --version {}", c_stoppedDistroName, g_testDistroPath, LxsstuVmMode() ? 2 : 1)), 0L);
+        auto cleanup = wil::scope_exit_log(
+            WI_DIAGNOSTICS_INFO, [&]() { LxsstuLaunchWsl(std::format(L"--unregister {}", c_stoppedDistroName)); });
+
+        WslShutdown();
+
+        WslKeepAlive keepAlive(nullptr, LXSS_DISTRO_NAME_TEST_L);
+
+        auto [out, err] = LxsstuLaunchWslAndCaptureOutput(L"--list --verbose");
+        VERIFY_IS_TRUE(out.find(LXSS_DISTRO_NAME_TEST_L) != std::wstring::npos);
+        VERIFY_IS_TRUE(out.find(c_stoppedDistroName) != std::wstring::npos);
+        VERIFY_ARE_EQUAL(err, L"");
+
+        for (const auto* commandLine : {L"--list --running --verbose", L"-l -v --running"})
+        {
+            std::tie(out, err) = LxsstuLaunchWslAndCaptureOutput(commandLine);
+            VERIFY_IS_TRUE(out.find(LXSS_DISTRO_NAME_TEST_L) != std::wstring::npos);
+            VERIFY_IS_TRUE(out.find(c_stoppedDistroName) == std::wstring::npos);
+            VERIFY_ARE_EQUAL(err, L"");
+        }
+    }
+
+    WSL2_TEST_METHOD(ExecSearchPath)
+    {
+        auto cleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, []() { LxsstuLaunchWsl(L"rm -f /usr/sbin/wsl-exec-path-test"); });
+        LxsstuLaunchWsl(
+            L"printf '#!/bin/sh\\nprintf found\\n' > /usr/sbin/wsl-exec-path-test && chmod +x /usr/sbin/wsl-exec-path-test");
+
+        VerifyOutput(L"--exec wsl-exec-path-test", L"found");
+    }
+
+    WSL2_TEST_METHOD(MissingWindowsStdinDeliversEof)
+    {
+        const auto installPath = wsl::windows::common::wslutil::GetMsiPackagePath();
+        const auto wslPath = installPath.value() + L"wsl.exe";
+
+        for (const auto stdinHandle : {static_cast<HANDLE>(nullptr), INVALID_HANDLE_VALUE})
+        {
+            auto [stdoutRead, stdoutWrite] = CreateSubprocessPipe(false, true);
+            auto [stderrRead, stderrWrite] = CreateSubprocessPipe(false, true);
+            auto commandLine = std::format(L"\"{}\" --exec /bin/sh -c \"cat && printf stdout && printf stderr >&2 && exit 42\"", wslPath);
+
+            STARTUPINFOW startupInfo{};
+            startupInfo.cb = sizeof(startupInfo);
+            startupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startupInfo.hStdInput = stdinHandle;
+            startupInfo.hStdOutput = stdoutWrite.get();
+            startupInfo.hStdError = stderrWrite.get();
+
+            wil::unique_process_information processInfo;
+            VERIFY_WIN32_BOOL_SUCCEEDED(CreateProcessW(
+                wslPath.c_str(), commandLine.data(), nullptr, nullptr, TRUE, DETACHED_PROCESS, nullptr, nullptr, &startupInfo, &processInfo));
+            auto cleanup = wil::scope_exit_log(
+                WI_DIAGNOSTICS_INFO, [&]() { LOG_IF_WIN32_BOOL_FALSE(TerminateProcess(processInfo.hProcess, 1)); });
+
+            stdoutWrite.reset();
+            stderrWrite.reset();
+            VERIFY_ARE_EQUAL(WAIT_OBJECT_0, WaitForSingleObject(processInfo.hProcess, 30000));
+            cleanup.release();
+            VERIFY_ARE_EQUAL(42u, wsl::windows::common::SubProcess::GetExitCode(processInfo.hProcess, 0));
+
+            std::array<char, 32> buffer{};
+            DWORD bytesRead{};
+            VERIFY_WIN32_BOOL_SUCCEEDED(ReadFile(stdoutRead.get(), buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr));
+            VERIFY_ARE_EQUAL(std::string("stdout"), std::string(buffer.data(), bytesRead));
+            VERIFY_WIN32_BOOL_SUCCEEDED(ReadFile(stderrRead.get(), buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr));
+            VERIFY_ARE_EQUAL(std::string("stderr"), std::string(buffer.data(), bytesRead));
+        }
     }
 };
 } // namespace UnitTests

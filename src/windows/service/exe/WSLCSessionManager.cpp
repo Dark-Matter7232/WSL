@@ -28,7 +28,7 @@ Abstract:
 --*/
 
 #include "WSLCSessionManager.h"
-#include "HcsVirtualMachine.h"
+#include "WSLCVirtualMachineHost.h"
 #include "WSLCUserSettings.h"
 #include "WSLCSessionDefaults.h"
 #include "WSLCPluginNotifier.h"
@@ -39,12 +39,12 @@ Abstract:
 #include "filesystem.hpp"
 #include "APICompat.h"
 #include "Localization.h"
+#include "HcsVirtualMachineBackend.h"
 
 extern wsl::windows::service::PluginManager g_pluginManager;
 
 using wsl::windows::common::COMServiceExecutionContext;
 using wsl::windows::service::wslc::CallingProcessTokenInfo;
-using wsl::windows::service::wslc::HcsVirtualMachine;
 using wsl::windows::service::wslc::MarshaledSessionReference;
 using wsl::windows::service::wslc::WSLCPluginNotifier;
 using wsl::windows::service::wslc::WSLCSessionManagerImpl;
@@ -339,7 +339,7 @@ void WSLCSessionManagerImpl::CreateSession(
 
         // Create the VM factory in the SYSTEM service (privileged). The per-user session
         // uses it to create VMs on demand and recreate them after idle-termination.
-        auto vmFactory = Microsoft::WRL::Make<WSLCVirtualMachineFactory>(Settings);
+        auto vmFactory = Microsoft::WRL::Make<WSLCVirtualMachineFactory>(Settings, HcsVirtualMachineBackend::Create);
 
         // Launch per-user COM server factory and add it to a fresh per-session job object for crash cleanup.
         auto factory = wslutil::CreateComServerAsUser<IWSLCSessionFactory>(__uuidof(WSLCSessionFactory), userToken.get());
@@ -701,7 +701,9 @@ HRESULT WSLCSessionManager::OpenSessionByName(_In_ LPCWSTR DisplayName, _Out_ IW
 
 HRESULT WSLCSessionManager::InterfaceSupportsErrorInfo(_In_ REFIID riid)
 {
-    return riid == __uuidof(IWSLCSessionManager) ? S_OK : S_FALSE;
+    return riid == __uuidof(IWSLCSessionManager) || riid == __uuidof(IWSLCCompatSessionManager) || riid == __uuidof(IWSLCCompatSessionManager2)
+               ? S_OK
+               : S_FALSE;
 }
 
 HRESULT WSLCSessionManager::GetVersion(_Out_ WSLCCompatVersion* Version)
@@ -737,6 +739,25 @@ try
         RETURN_IF_FAILED(CreateSession(settings.Get(), Flags, warning.Get(), &session));
     }
 
+    RETURN_HR_IF_NULL(E_UNEXPECTED, session);
+
+    return session.CopyTo(Session);
+}
+CATCH_RETURN();
+
+HRESULT WSLCSessionManager::CreateSession2(
+    const WSLCCompatSessionSettings2* Settings, WSLCSessionFlags Flags, IWSLCCompatWarningCallback* WarningCallback, IWSLCCompatSession** Session)
+try
+{
+    RETURN_HR_IF_NULL(E_POINTER, Session);
+    *Session = nullptr;
+    RETURN_HR_IF_NULL(E_POINTER, Settings);
+
+    const auto warning = apicompat::Convert(WarningCallback);
+    const auto settings = apicompat::Convert(*Settings);
+
+    Microsoft::WRL::ComPtr<IWSLCSession> session;
+    RETURN_IF_FAILED(CreateSession(settings.Get(), Flags, warning.Get(), &session));
     RETURN_HR_IF_NULL(E_UNEXPECTED, session);
 
     return session.CopyTo(Session);

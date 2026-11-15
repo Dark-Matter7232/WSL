@@ -634,6 +634,7 @@ class PluginTests
                 Process created
                 Failed process launch returned:  -2147467259
                 Invalid distro launch returned:  -2147220717
+                Process terminated by SIGTERM
                 Distribution Stopping, name=test_distro, package=, PidNs=*, Flavor=debian, Version=13
                 VM Stopping)";
 
@@ -1083,6 +1084,80 @@ class PluginTests
         VERIFY_SUCCEEDED(releaseResult);
     }
 
+    // Reentry from a container stop callback during Terminate must fail instead of deadlocking.
+    WSL2_TEST_METHOD(WslcContainerStoppingDuringTerminate)
+    {
+        ConfigurePlugin(PluginTestType::WslcContainerStoppingDuringTerminate);
+
+        wil::unique_event entered;
+        entered.create(wil::EventOptions::ManualReset, c_containerStoppingEnteredEvent);
+
+        // Shared with the terminate thread, which is detached rather than joined if the deadlock regresses.
+        struct TerminateState
+        {
+            wil::unique_event Completed{wil::EventOptions::ManualReset};
+            HRESULT Result = E_PENDING;
+        };
+
+        const auto terminate = std::make_shared<TerminateState>();
+        std::thread terminateThread;
+        auto joinTerminate = wil::scope_exit([&]() {
+            if (terminateThread.joinable())
+            {
+                if (terminate->Completed.wait(60000))
+                {
+                    terminateThread.join();
+                }
+                else
+                {
+                    terminateThread.detach();
+                }
+            }
+        });
+
+        {
+            auto session = CreateWslcSession(L"plugin-wslc-container-stopping-terminate");
+
+            LoadTestImage(*session, "debian:latest");
+
+            wsl::windows::common::WSLCContainerLauncher launcher(
+                "debian:latest", "wslc-plugin-container-stopping-terminate", {"/bin/cat"}, {}, "host", WSLCProcessFlagsStdin);
+            auto container = launcher.Launch(*session);
+            auto process = container.GetInitProcess();
+
+            // Close stdin after launch so the stop callback cannot block Launch().
+            process.GetStdHandle(0);
+
+            VERIFY_IS_TRUE(entered.wait(30000));
+
+            terminateThread = std::thread([terminate, session]() {
+                terminate->Result = wil::ResultFromException([&]() {
+                    const auto coInit = wil::CoInitializeEx(COINIT_MULTITHREADED);
+                    THROW_IF_FAILED(session->Terminate());
+                });
+                terminate->Completed.SetEvent();
+            });
+
+            // The callback reenters once the teardown announces the VM stop, then the teardown waits for it.
+            VERIFY_IS_TRUE(terminate->Completed.wait(60000));
+            VERIFY_SUCCEEDED(terminate->Result);
+        }
+
+        const auto ExpectedOutput = std::format(
+            LR"(Plugin loaded. TestMode={1}
+            WSLC Session created, name=plugin-wslc-container-stopping-terminate, id=*, pid=*, token=set, sid=set
+            WSLC Image created, session=*, id=sha256:*, name=debian:latest
+            WSLC Container started, session=*, id=*, name=*, image=debian:latest, state=*
+            WSLC Container stopping, session=*, id=*
+            WSLC Container stopping reentrant WSLCCreateProcess: {0:#x}
+            WSLC Container stopping reentrant WSLCMountFolder: {0:#x}
+            WSLC Session stopping, name=plugin-wslc-container-stopping-terminate, id=*)",
+            static_cast<uint32_t>(HRESULT_FROM_WIN32(ERROR_INVALID_STATE)),
+            static_cast<DWORD>(PluginTestType::WslcContainerStoppingDuringTerminate));
+
+        ValidateLogFile(ExpectedOutput.c_str());
+    }
+
     WSL2_TEST_METHOD(WslcVmNeverStarted)
     {
         ConfigurePlugin(PluginTestType::WslcVmNeverStarted);
@@ -1104,6 +1179,54 @@ class PluginTests
             WSLC Session stopping, name=plugin-wslc-vm-never-started, id=*)";
 
         ValidateLogFile(ExpectedOutput);
+    }
+
+    WSL2_TEST_METHOD(CgroupIsolation)
+    {
+        WslConfigChange isolatedConfig(LxssGenerateTestConfig({.vmIdleTimeout = -1, .isolateDistroCgroup = true}));
+        StopWslService();
+
+        const auto secondPlugin = std::filesystem::path(pluginDll).parent_path() / L"testplugin-isolation.dll";
+        std::filesystem::copy_file(pluginDll, secondPlugin, std::filesystem::copy_options::overwrite_existing);
+        const auto key =
+            CreateKey(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss\\Plugins", KEY_SET_VALUE, nullptr, 0);
+        auto cleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&]() {
+            StopWslService();
+            DeleteValue(key.get(), L"TestPlugin-Isolated");
+            std::filesystem::remove(secondPlugin);
+        });
+        WriteString(key.get(), nullptr, L"TestPlugin-Isolated", secondPlugin.c_str());
+
+        ConfigurePlugin(PluginTestType::CgroupIsolation);
+        StartWsl(0);
+
+        constexpr char script[] = R"sh(
+{
+    sh -ec '
+        previous=
+        for plugin in testplugin testplugin-isolation; do
+            set -- $(pgrep -f "^$plugin[.]dll 3600$")
+            test "$#" -eq 2
+            cgroup=$(cat "/proc/$1/cgroup")
+            test "$cgroup" = "$(cat "/proc/$2/cgroup")"
+            printf "%s\n" "$cgroup" | grep -Eq "^0::/wsl-user/plugin-[0-9]+$"
+            test "$cgroup" != "$previous"
+            previous=$cgroup
+        done
+    ' && printf '\n%s%s\n' CGROUP_ PASS
+    busybox poweroff -f
+}
+)sh";
+
+        auto [inputRead, inputWrite] = CreateSubprocessPipe(true, false);
+        VERIFY_WIN32_BOOL_SUCCEEDED(WriteFile(inputWrite.get(), script, static_cast<DWORD>(sizeof(script) - 1), nullptr, nullptr));
+        inputWrite.reset();
+
+        auto commandLine = LxssGenerateWslCommandLine(L"--debug-shell");
+        const auto [output, error, exitCode] = LxsstuLaunchCommandAndCaptureOutputWithResult(commandLine.data(), inputRead.get());
+        VERIFY_ARE_EQUAL(LxsstuLaunchWsl(L"--shutdown --force"), 0L);
+        LogInfo("Debug shell output: %ls\n%ls", output.c_str(), error.c_str());
+        VERIFY_IS_TRUE(output.find(L"CGROUP_PASS") != std::wstring::npos);
     }
 
     // This test must run last so it doesn't break test cases that depends on plugin signature.
